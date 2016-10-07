@@ -1,0 +1,28 @@
+{
+  "name": "baleen-mailfilter-js",
+  "version": "0.1.0",
+  "description": "SMTP capable mail filter for use as before queue filter for postfix and other MTAs.",
+  "main": "src/baleen.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/datenwelt/baleen-mailfilter-js.git"
+  },
+  "keywords": [
+    "mail",
+    "filter",
+    "postfix",
+    "mta"
+  ],
+  "author": "Jan Obladen <obladen@datenwelt.net>",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/datenwelt/baleen-mailfilter-js/issues"
+  },
+  "homepage": "https://github.com/datenwelt/baleen-mailfilter-js#readme",
+  "dependencies": {
+    "smtp-server": "^1.15.0"
+  }
+}
