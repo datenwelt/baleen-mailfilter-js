@@ -5,8 +5,17 @@ var SMTPServer = require('smtp-server').SMTPServer;
 var strfmt = require('util').format;
 var _ = require('underscore');
 
-var log = bunyan.createLogger({name: 'baleen'});
+var BaleenReject = require('./master/reject.js');
+
+var log = bunyan.createLogger({name: 'baleen-master'});
 log.level(process.env.BALEEN_DEBUG ? 'DEBUG' : 'INFO');
+
+var EXCHANGES = ['CHECK_CLIENT', 'CHECK_SENDER', 'CHECK_RECIPIENT', 'CHECK_MESSAGE', 'DEAD_LETTERS'];
+var QUEUES = ['DEFER', 'DELIVER', 'DISCARD', 'INCOMING', 'REJECT'];
+var DEAD_LETTER_EXCHANGE = 'DEAD_LETTERS';
+var DEAD_LETTER_QUEUE = 'HOLD';
+
+var SESSIONS = {};
 
 setupMq()
     .then(function (state) {
@@ -42,30 +51,28 @@ function setupMq() {
                     state.mq.conn = conn;
                     log.debug('Creating mq channel to setup RabbitMQ enviroment.');
                     return conn.createChannel();
-                })
-                .then(function (channel) {
+                }).then(function (channel) {
                     /* Setup all exchanges. */
                     state.mq.channel = channel;
                     channel.on('error', function (error) {
                         reject(error);
                     });
-                    var asserts = _.map(['CHECK_CLIENT', 'CHECK_SENDER', 'CHECK_RECIPIENT', 'CHECK_MESSAGE', 'DEAD_LETTERS'], function (exchange) {
+                    var asserts = _.map(EXCHANGES, function (exchange) {
                         log.debug('Asserting existence of exchange %s.', exchange);
-                        return channel.assertExchange(exchange, exchange == 'DEAD_LETTERS' ? 'fanout' : 'direct', {
+                        return channel.assertExchange(exchange, exchange == DEAD_LETTER_EXCHANGE ? 'fanout' : 'direct', {
                             durable: true
                         });
                     });
                     return Promise.when(asserts);
-                })
-                .then(function (exchanges) {
+                }).then(function (exchanges) {
                     /* Setup all default queues. */
                     var channel = state.mq.channel;
-                    var queues = ['DEFER', 'DELIVER', 'DISCARD', 'INCOMING', 'REJECT'];
+                    var queues = QUEUES;
                     var asserts = [];
                     _.each(exchanges, function (exchange) {
                         exchange = exchange.exchange;
-                        if (exchange == 'DEAD_LETTERS') {
-                            queues = ['HOLD'];
+                        if (exchange == DEAD_LETTER_EXCHANGE) {
+                            queues = [DEAD_LETTER_QUEUE];
                         }
                         _.each(queues, function (queue) {
                             var queueName = strfmt('%s.%s', exchange, queue);
@@ -74,19 +81,18 @@ function setupMq() {
                                 'durable': true,
                                 'arguments': {
                                     'messageTtl': 15000,
-                                    'deadLetterExchange': 'DEAD_LETTERS'
+                                    'deadLetterExchange': DEAD_LETTER_EXCHANGE
                                 }
                             }));
                         });
                     });
                     return Promise.when(asserts);
-                })
-                .then(function(queues) {
+                }).then(function (queues) {
                     var channel = state.mq.channel;
-                    var bindings = _.map(queues, function(queue) {
+                    var bindings = _.map(queues, function (queue) {
                         queue = queue.queue;
                         var matches = /(.+)\.(.+)/.exec(queue);
-                        if ( !matches ) {
+                        if (!matches) {
                             log.error('Skipping binding of queue %s. Queue name does not follow expected convention <EXCHANGE>.<QUEUE_NAME>.', queue);
                             return;
                         }
@@ -96,11 +102,17 @@ function setupMq() {
                         return channel.bindQueue(queue, exchange, routingKey);
                     });
                     return Promise.when(bindings);
-                })
-                .then(function () {
+                }).then(function () {
+                    var filters = [];
+                    _.each(EXCHANGES, function(exchange) {
+                        if ( exchange == DEAD_LETTER_EXCHANGE ) return;
+                        var filter = new BaleenReject(SESSIONS, exchange, 'REJECT');
+                        filters.push(filter.start());
+                    });
+                    return Promise.when(filters);
+                }).then(function () {
                     resolve(state);
-                })
-                .catch(function (error) {
+                }).catch(function (error) {
                     log.error('Unable to setup RabbitMQ at %s: %s', state.mq.uri, error);
                     reject(error);
                 }).finally(function () {
