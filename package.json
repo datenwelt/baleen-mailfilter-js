@@ -23,6 +23,10 @@
   },
   "homepage": "https://github.com/datenwelt/baleen-mailfilter-js#readme",
   "dependencies": {
-    "smtp-server": "^1.15.0"
+    "amqplib": "^0.4.2",
+    "bunyan": "^1.8.1",
+    "cargo-js": "https://github.com/datenwelt/cargo-js#v0.1.4",
+    "smtp-server": "^1.15.0",
+    "underscore": "^1.8.3"
   }
 }
