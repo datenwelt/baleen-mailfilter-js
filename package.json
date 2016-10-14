@@ -27,6 +27,7 @@
     "bunyan": "^1.8.1",
     "cargo-js": "https://github.com/datenwelt/cargo-js#v0.1.4",
     "smtp-server": "^1.15.0",
-    "underscore": "^1.8.3"
+    "underscore": "^1.8.3",
+    "urijs": "^1.18.2"
   }
 }

@@ -6,56 +6,72 @@ var SMTPServer = require('smtp-server').SMTPServer;
 var strfmt = require('util').format;
 var _ = require('underscore');
 
-
 var BaleenReject = require('./master/reject.js');
+var RabbitMQ = require('./lib/rabbitmq.js');
 
-var log = bunyan.createLogger({name: 'baleen-master'});
-log.level(process.env.BALEEN_DEBUG ? 'DEBUG' : 'INFO');
+var DEFAULT_EXCHANGES = ['CHECK_CLIENT', 'CHECK_SENDER', 'CHECK_RECIPIENT', 'CHECK_MESSAGE', 'DEAD_LETTERS'];
+var DEFAULT_QUEUES = ['DEFER', 'DELIVER', 'DISCARD', 'INCOMING', 'REJECT'];
+var DEFAULT_DEAD_LETTER_EXCHANGE = 'DEAD_LETTERS';
+var DEFAULT_DEAD_LETTER_QUEUE = 'HOLD';
 
-var EXCHANGES = ['CHECK_CLIENT', 'CHECK_SENDER', 'CHECK_RECIPIENT', 'CHECK_MESSAGE', 'DEAD_LETTERS'];
-var QUEUES = ['DEFER', 'DELIVER', 'DISCARD', 'INCOMING', 'REJECT'];
-var DEAD_LETTER_EXCHANGE = 'DEAD_LETTERS';
-var DEAD_LETTER_QUEUE = 'HOLD';
+Master.prototype.constructor = Master;
 
-var SESSIONS = {};
+function Master(options) {
+    options = options || {};
+    options.mq = options.mq || {};
 
-setupMq()
-    .then(function (state) {
-        return startSMTPServer(state);
-    })
-    .catch(function (error) {
-        log.debug(error);
-        log.error('Exiting on critical errors.');
-        process.exit(1);
+    this.log = bunyan.createLogger({name: 'baleen-master'});
+    this.log.level(process.env.BALEEN_DEBUG ? 'DEBUG' : 'INFO');
+
+    if (!options.mq.uri && !process.env.BALEEN_RABBITMQ_URI) {
+        throw new Error("Environment variable BALEEN_RABBITMQ_URI is empty. Please set the URI of your RabbitMQ instance.");
+    }
+
+    this.mq = new RabbitMQ(options.mq.uri || process.env.BALEEN_RABBITMQ_URI, {heartbeat: 15});
+    this.mq.exchanges = options.mq.exchanges || DEFAULT_EXCHANGES;
+    this.mq.queue = options.mq.queue || DEFAULT_QUEUES;
+    this.mq.deadLetterExchange = options.mq.deadLetterExchange || DEFAULT_DEAD_LETTER_EXCHANGE;
+    this.mq.deadLetterQueue = options.mq.deadLetterQueue || DEFAULT_DEAD_LETTER_QUEUE;
+
+    return this;
+}
+
+Master.prototype.start = function () {
+    var state = this;
+    return new Promise(function (resolve, reject) {
+        state.mq.connect().then(function(conn) {
+            state.mq.newChannel().then(function(channel) {
+                state.mq.channel = channel;
+            }).catch(function(error) {
+                log.error('Unable to start master process: %s', error);
+            });
+        })
     });
 
-function setupMq() {
+
+};
+/*
+Master.prototype.initMq = function () {
+    var mq = this.mq = {};
     return new Promise(function (resolve, reject) {
-        if (!process.env.BALEEN_RABBITMQ_URI) {
-            throw new Error("Environment variable BALEEN_RABBITMQ_URI is empty. Please set the URI of your RabbitMQ instance.");
-        }
-        var realUri = process.env.BALEEN_RABBITMQ_URI;
-        if (!/^amqp:\/\//.test(realUri)) {
+        mq.realUri =;
+        if (!/^amqp:\/\//.test(mq.realUri)) {
             throw new Error("Environment variable BALEEN_RABBITMQ_URI does not contain a valid RabbitMQ URI.");
         }
-        var state = {};
-        state.mq = {};
-        state.mq.uri = realUri.replace(/^(amqps?:\/\/.+:).+(@.+)/, "$1******$2");
+        mq.uri = mq.realUri.replace(/^(amqps?:\/\/.+:).+(@.+)/, "$1******$2");
         try {
-            log.debug('Connecting to message queue at %s.', state.mq.uri);
-            realUri += "?heartbeat=15";
-            return amqplib.connect(realUri)
+            log.debug('Connecting to message queue at %s.', mq.uri);
+            mq.realUri += "?heartbeat=15";
+            return amqplib.connect(mq.realUri)
                 .then(function (conn) {
-                    /* Connect to the MQ and create a channel. */
                     conn.on('error', function (error) {
                         reject(error);
                     });
-                    state.mq.conn = conn;
+                    mq.conn = conn;
                     log.debug('Creating mq channel to setup RabbitMQ enviroment.');
                     return conn.createChannel();
                 }).then(function (channel) {
-                    /* Setup all exchanges. */
-                    state.mq.channel = channel;
+                    mq.channel = channel;
                     channel.on('error', function (error) {
                         reject(error);
                     });
@@ -67,7 +83,6 @@ function setupMq() {
                     });
                     return Promise.when(asserts);
                 }).then(function (exchanges) {
-                    /* Setup all default queues. */
                     var channel = state.mq.channel;
                     var queues = QUEUES;
                     var asserts = [];
@@ -106,8 +121,8 @@ function setupMq() {
                     return Promise.when(bindings);
                 }).then(function () {
                     var filters = [];
-                    _.each(EXCHANGES, function(exchange) {
-                        if ( exchange == DEAD_LETTER_EXCHANGE ) return;
+                    _.each(EXCHANGES, function (exchange) {
+                        if (exchange == DEAD_LETTER_EXCHANGE) return;
                         var filter = new BaleenReject(SESSIONS, exchange, 'REJECT');
                         filters.push(filter.start());
                     });
@@ -129,6 +144,20 @@ function setupMq() {
             reject(error);
         }
     });
+};
+
+setupMq()
+    .then(function (state) {
+        return startSMTPServer(state);
+    })
+    .catch(function (error) {
+        log.debug(error);
+        log.error('Exiting on critical errors.');
+        process.exit(1);
+    });
+
+function setupMq() {
+
 }
 
 function startSMTPServer(state) {
@@ -137,6 +166,7 @@ function startSMTPServer(state) {
         banner: 'baleen mail filter ready',
         disabledCommands: 'AUTH',
         useXForward: true,
+        onConnect: _.bind(onConnect, state),
         onData: _.bind(onData, state)
     };
     return new Promise(function (resolve) {
@@ -155,6 +185,12 @@ function onError(error) {
     log.error(error);
 }
 
+function onConnect(session, callback) {
+    var state = this;
+    var session = {};
+
+}
+
 function onData(stream, serverSession, callback) {
     var state = this;
     var session = {};
@@ -167,13 +203,17 @@ function onData(stream, serverSession, callback) {
         hash.update("" + Date.now());
         session.id = hash.digest('hex').substr(0, 16).toUpperCase();
     } while (SESSIONS[session.id]);
-    if ( !state.mq || !state.mq.conn ) {
+    if (!state.mq || !state.mq.conn) {
         var smtpReply = new Error("Requested action aborted: local error in processing");
         smtpReply.responseCode = 451;
         callback(smtpReply);
     }
-    state.mq.conn.createConfirmChannel().then(function(channel) {
+    state.mq.conn.createConfirmChannel().then(function (channel) {
         var msg = Bufffer.from(JSON.stringify(session));
         channel.publish()
     });
 }
+*/
+
+var master = new Master();
+master.start();
