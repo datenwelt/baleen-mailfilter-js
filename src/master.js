@@ -1,9 +1,11 @@
 var amqplib = require('amqplib');
 var bunyan = require('bunyan');
+var crypto = require('crypto');
 var Promise = require('cargo-js/dist/promise.js');
 var SMTPServer = require('smtp-server').SMTPServer;
 var strfmt = require('util').format;
 var _ = require('underscore');
+
 
 var BaleenReject = require('./master/reject.js');
 
@@ -135,7 +137,7 @@ function startSMTPServer(state) {
         banner: 'baleen mail filter ready',
         disabledCommands: 'AUTH',
         useXForward: true,
-        onData: onData
+        onData: _.bind(onData, state)
     };
     return new Promise(function (resolve) {
         state.smtpd = {};
@@ -153,6 +155,25 @@ function onError(error) {
     log.error(error);
 }
 
-function onData(_, session) {
-    log.info(JSON.stringify(session));
+function onData(stream, serverSession, callback) {
+    var state = this;
+    var session = {};
+    session.smtpdSession = serverSession;
+    session.smtpdCallback = callback;
+    do {
+        var hash = crypto.createHash('sha256');
+        hash.update(serverSession.id);
+        hash.update("" + Math.random());
+        hash.update("" + Date.now());
+        session.id = hash.digest('hex').substr(0, 16).toUpperCase();
+    } while (SESSIONS[session.id]);
+    if ( !state.mq || !state.mq.conn ) {
+        var smtpReply = new Error("Requested action aborted: local error in processing");
+        smtpReply.responseCode = 451;
+        callback(smtpReply);
+    }
+    state.mq.conn.createConfirmChannel().then(function(channel) {
+        var msg = Bufffer.from(JSON.stringify(session));
+        channel.publish()
+    });
 }
