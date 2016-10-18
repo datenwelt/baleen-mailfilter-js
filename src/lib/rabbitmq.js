@@ -4,18 +4,19 @@ var bunyan = require('bunyan');
 var URI = require('urijs');
 
 
-module.exports = RabbitMQ;
+module.exports.Connection = Connection;
+module.exports.Channel = Channel;
 
-RabbitMQ.prototype.constructor = RabbitMQ;
+Connection.prototype.constructor = Connection;
 
 /**
- * Create a new RabbitMQ object.
- * @param uri The RabbitMQ URI to connect to.
- * @param options Options for the RabbitMQ connection.
+ * Create a new Connection object.
+ * @param uri The Connection URI to connect to.
+ * @param options Options for the Connection connection.
  * @param log An optional (bunyan-style) logger instance.
  * @constructor
  */
-function RabbitMQ(uri, options, log) {
+function Connection(uri, options, log) {
     var state = this;
     options = options || {};
     if (!uri) {
@@ -27,7 +28,7 @@ function RabbitMQ(uri, options, log) {
         throw new Error("Parameter #1 (uri='%s') cannot be parsed: %s", uri, error);
     }
     if (!uri.scheme() == "amqp" || uri.scheme() == "amqps") {
-        throw new Error("Parameter #1 (uri='%s') is not a valid RabbitMQ URI. URI must start with 'amqp(s)://'.");
+        throw new Error("Parameter #1 (uri='%s') is not a valid Connection URI. URI must start with 'amqp(s)://'.");
     }
     if (!log) {
         log = bunyan.createLogger({name: 'baleen.rabbitmq'});
@@ -45,7 +46,7 @@ function RabbitMQ(uri, options, log) {
     this.conn = undefined;
 }
 
-RabbitMQ.prototype.connect = function () {
+Connection.prototype.connect = function () {
     var state = this;
     if (state.conn) {
         return Promise.resolve(state.conn);
@@ -59,20 +60,20 @@ RabbitMQ.prototype.connect = function () {
                     state.conn = conn;
                     state.conn.on('close', _.bind(state.onClose, state));
                     state.conn.on('error', _.bind(state.onError, state));
-                    state.log.error('Connected to RabbitMQ at %s.', state.displayUri);
+                    state.log.error('Connected to Connection at %s.', state.displayUri);
                     resolve(state.conn);
                 }).catch(function (error) {
-                    state.log.error('Unable to connect to RabbitMQ at %s: %s', state.displayUri, error);
+                    state.log.error('Unable to connect to Connection at %s: %s', state.displayUri, error);
                     reject(error);
                 });
         } catch (error) {
-            state.log.error('Unable to connect to RabbitMQ at %s: %s', this.toString(), error);
+            state.log.error('Unable to connect to Connection at %s: %s', this.toString(), error);
             reject(error);
         }
     });
 };
 
-RabbitMQ.prototype.newChannel = function () {
+Connection.prototype.newChannel = function () {
     var state = this;
     return new Promise(function(resolve, reject) {
         state.connect().then(function () {
@@ -86,7 +87,7 @@ RabbitMQ.prototype.newChannel = function () {
     });
 };
 
-RabbitMQ.prototype.newConfirmChannel = function () {
+Connection.prototype.newConfirmChannel = function () {
     var state = this;
     return new Promise(function(resolve, reject) {
         state.connect().then(function () {
@@ -100,21 +101,21 @@ RabbitMQ.prototype.newConfirmChannel = function () {
     });
 };
 
-RabbitMQ.prototype.onClose = function (error) {
+Connection.prototype.onClose = function (error) {
     this.conn = undefined;
     if (error) {
-        this.log.debug('RabbitMQ broker at %s has closed connection. Reason: %s', this.displayUri, error);
+        this.log.debug('Connection broker at %s has closed connection. Reason: %s', this.displayUri, error);
     } else {
         this.log.debug('Connection to %s closed.', this.displayUri);
     }
 };
 
-RabbitMQ.prototype.onError = function (error) {
+Connection.prototype.onError = function (error) {
     this.conn = undefined;
-    this.log.debug('RabbitMQ broker at %s has closed connection with error: %s', this.displayUri, error);
+    this.log.debug('Connection broker at %s has closed connection with error: %s', this.displayUri, error);
 };
 
-RabbitMQ.prototype.toString = function () {
+Connection.prototype.toString = function () {
     return this.displayUri;
 };
 
@@ -149,7 +150,7 @@ Channel.prototype.create = function () {
                 }
             })
             .catch(function (error) {
-                state.mq.log.error('Unable to create new channel for broker %s: %s', state.mq.displayUri, error);
+                state.mq.log.error(error, 'Unable to create new channel for broker %s: %s', state.mq.displayUri, error);
                 reject(error);
             });
     });
