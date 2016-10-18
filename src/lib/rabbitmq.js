@@ -60,14 +60,14 @@ Connection.prototype.connect = function () {
                     state.conn = conn;
                     state.conn.on('close', _.bind(state.onClose, state));
                     state.conn.on('error', _.bind(state.onError, state));
-                    state.log.error('Connected to Connection at %s.', state.displayUri);
+                    state.log.debug('Connected to message queue at %s.', state.displayUri);
                     resolve(state.conn);
                 }).catch(function (error) {
-                    state.log.error('Unable to connect to Connection at %s: %s', state.displayUri, error);
+                    state.log.error('Unable to connect to message queue at %s: %s', state.displayUri, error);
                     reject(error);
                 });
         } catch (error) {
-            state.log.error('Unable to connect to Connection at %s: %s', this.toString(), error);
+            state.log.error('Unable to connect to message queue at %s: %s', this.toString(), error);
             reject(error);
         }
     });

@@ -16,7 +16,7 @@ function Baleen(exchange, queue, filterFn) {
     this.routingKey = queue;
     this.queue = strfmt('%s.%s', exchange, queue);
     this.filterFn = filterFn;
-
+    return this;
 }
 
 Baleen.prototype.start = function () {
