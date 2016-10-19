@@ -5,16 +5,17 @@ var strfmt = require('util').format;
 var _ = require('underscore');
 
 module.exports.Server = Server;
+module.exports.smtpError = smtpError;
+
+var log = bunyan.createLogger({name: 'baleen.rabbitmq'});
+log.level(process.env.BALEEN_DEBUG ? 'DEBUG' : 'INFO');
 
 Server.prototype.constructor = Server;
 
 function Server(master) {
 	this.sessions = {};
-	this.smtpinfos = {};
 	this.master = master;
 	this.suspended = false;
-	this.logger = bunyan.createLogger({name: 'baleen.rabbitmq'});
-	this.logger.level(process.env.BALEEN_DEBUG ? 'DEBUG' : 'INFO');
 	return this;
 }
 
@@ -23,8 +24,7 @@ Server.prototype.init = function () {
 	delete state.smtpd;
 	return new Promise(function (resolve) {
 		state.address = process.env.BALEEN_SMTPD_LISTEN || '0.0.0.0:10028';
-		state.logger.debug('Initializing smtp server at %s.', state.address);
-		var pos = state.address.indexOf(':');
+		log.debug('Initializing smtp server at %s.', state.address);
 		var matches = /(.+)?:(\d+)/.exec(state.address);
 		if (!matches) {
 			throw new Error(strfmt('Invalid value ("%s") for BALEEN_SMTPD_LISTEN. The value must at least specify a port number in the format ":PORT".', state.address));
@@ -47,7 +47,7 @@ Server.prototype.start = function () {
 		state.smtpd = {};
 		state.smtpd.server = new SMTPServer(options);
 		var errBack = function (error) {
-			state.logger.debug('Unable to start smtp server at %s: %s', state.address, error);
+			log.debug('Unable to start smtp server at %s: %s', state.address, error);
 			reject(error);
 		};
 		state.smtpd.onClose = _.bind(state.onClose, state);
@@ -57,13 +57,13 @@ Server.prototype.start = function () {
 
 		try {
 			state.smtpd.server.listen(state.port, state.host, function () {
-				state.logger.debug('Smtp server listening at %s', state.address);
+				log.debug('Smtp server listening at %s', state.address);
 				state.smtpd.server.removeListener('on', errBack);
 				state.smtpd.server.on('error', state.smtpd.onError);
 				resolve(state);
 			});
 		} catch (error) {
-			state.logger.debug('Unable to start smtp server at %s: %s', this.address, error);
+			log.debug('Unable to start smtp server at %s: %s', this.address, error);
 			state.smtpd.server.removeListener('on', errBack);
 			state.smtpd.server = undefined;
 			reject(error);
@@ -84,7 +84,7 @@ Server.prototype.suspend = function (message, code) {
 	message = message || 'Server is currently undergoing an unscheduled maintenance. Please try again later.';
 	code = code || 421;
 	return new Promise(function (resolve) {
-		state.logger.info('Smtp server suspended with message: %d %s', code, message);
+		log.info('Smtp server suspended with message: %d %s', code, message);
 		state.suspended = {
 			message: message,
 			code: code
@@ -96,8 +96,7 @@ Server.prototype.suspend = function (message, code) {
 
 Server.prototype.resume = function () {
 	if (this.suspended) {
-		state.logger.info('Smtp server resumed after suspension.');
-		this.onConnect = this.suspend.savedCallback;
+		log.info('Smtp server resumed after suspension.');
 		delete this.suspended;
 	}
 	return Promise.resolve(this);
@@ -119,19 +118,27 @@ Server.prototype._cleanup = function () {
 };
 
 Server.prototype.onError = function (error) {
-	this.logger.debug('Closing smtp server on error: %s', error);
+	log.debug('Closing smtp server on error: %s', error);
 	this._cleanup();
 };
 
 Server.prototype.onClose = function () {
-	this.logger.debug('Smtp server at %s closed.', state.address);
-	this.smtpd.server.removeListener('close', smtpd.onClose);
-	this.smtpd.server.removeListener('error', smtpd.onError);
+	log.debug('Smtp server at %s closed.', state.address);
+	this.smtpd.server.removeListener('close', this.smtpd.onClose);
+	this.smtpd.server.removeListener('error', this.smtpd.onError);
 	delete this.smtpd.server;
 	delete this.smtpd;
 	this._cleanup();
 };
 
+/**
+ *
+ * @param smtpinfo
+ * @param smtpinfo.id
+ * @param smtpinfo.remoteAddress
+ * @param smtpinfo.xforward
+ * @param ready
+ */
 Server.prototype.onConnect = function (smtpinfo, ready) {
 	var state = this;
 	var client = {
@@ -145,31 +152,47 @@ Server.prototype.onConnect = function (smtpinfo, ready) {
 			info: strfmt('%s (via %s)', smtpinfo.xforward.client, smtpinfo.remoteAddress)
 		}
 	}
-	state.master.createSession().then(function (session) {
-		state.sessions[smtpinfo.id] = session.id;
-		session.client = client;
+	var session = state.master.createSession();
+	state.sessions[smtpinfo.id] = session.id;
+	session.client = client;
 
-		if (state.suspended) {
-			var message = state.suspend.message;
-			var code = state.suspend.code;
-			state.logger.info('[%s] Rejecting incoming connection from %s. Server suspended with message: "%d %s"',
-				session.id, session.client.info, code, message);
-			var reply = new Error(state.suspend.message);
-			reply.responseCode = this.suspend.code;
-			state.master.destroySession().then(function () {
-				delete state.sessions[smtpinfo.id];
-				ready(reply);
-			});
-		}
-		session.smtpInfo = smtpinfo;
-		session.smtpCallback = ready;
-		state.logger.info('[%s] Connect from client %s.', session.id, client.info);
+	if (state.suspended) {
+		var message = state.suspend.message;
+		var code = state.suspend.code;
+		log.info('[%s] Rejecting incoming connection from %s. Server suspended with message: "%d %s"',
+			session.id, session.client.info, code, message);
+		var reply = new Error(state.suspend.message);
+		reply.responseCode = this.suspend.code;
+		state.master.destroySession().then(function () {
+			delete state.sessions[smtpinfo.id];
+			ready(reply);
+		});
+	}
+	session.smtpInfo = smtpinfo;
+	session.smtpCallback = ready;
+	log.info('[%s] Connect from client %s.', session.id, client.info);
+	try {
 		state.master.checkClient(session.id);
-	}).catch(function (error) {
-		state.logger.error('Error creating a new session for client %s: %s', client.info, error);
-		state.logger.debug(error);
-		var reply = new Error('Internal server error, please try later.');
-		reply.responseCode = 421;
-		ready(reply);
-	});
+	} catch(error) {
+		log.debug('[%s] Error checking client of message: %s', session.id, error);
+		log.debug(error);
+		state.master.destroySession(session.id);
+		reply(smtpError());
+	}
 };
+
+function smtpError() {
+	var message = 'Transient internal server error. Please try again later.';
+	var code = 421;
+	_.each(arguments, function(arg) {
+		if ( _.isString(arg) ) {
+			message = arg;
+		}
+		if ( _.isNumber(arg) && arg > 0 ) {
+			code = arg;
+		}
+	});
+	var smtpError = new Error(message);
+	smtpError.responseCode = code;
+	return smtpError;
+}

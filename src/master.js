@@ -2,14 +2,13 @@ var amqplib = require('amqplib');
 var bunyan = require('bunyan');
 var crypto = require('crypto');
 var Promise = require('cargo-js/dist/promise.js');
-var SMTPServer = require('smtp-server').SMTPServer;
 var strfmt = require('util').format;
 var _ = require('underscore');
 
 var BaleenReject = require('./master/reject.js');
-var Channel = require('./lib/rabbitmq.js').Channel;
 var ConfirmChannel = require('./lib/rabbitmq.js').ConfirmChannel;
 var SMTPServer = require('./lib/smtp.js').Server;
+var smtpError = require('./lib/smtp.js').smtpError;
 
 var EXCHANGES = ['CHECK_CLIENT', 'CHECK_SENDER', 'CHECK_RECIPIENT', 'CHECK_MESSAGE'];
 var QUEUES = ['DEFER', 'DELIVER', 'DISCARD', 'INCOMING', 'REJECT'];
@@ -24,12 +23,13 @@ function Master() {
 	this.smtpd = false;
 	this.sessions = {};
 	this.queues = false;
+	this.consumers = {};
 	return this;
 }
 
 Master.prototype.start = function () {
 	var state = this;
-	log.info('Starting baleen mail filter master process.')
+	log.info('Starting baleen mail filter master process.');
 	return state.init()
 	.then(function () {
 		return state.run();
@@ -107,17 +107,15 @@ Master.prototype.initMQ = function () {
 
 Master.prototype.createSession = function () {
 	var state = this;
-	return new Promise(function (resolve) {
-		var session = {};
-		do {
-			var hash = crypto.createHash('sha256');
-			hash.update("" + Math.random());
-			hash.update("" + Date.now());
-			session.id = hash.digest('hex').substr(0, 16).toUpperCase();
-		} while (state.sessions[session.id]);
-		state.sessions[session.id] = session;
-		resolve(session);
-	});
+	var session = {};
+	do {
+		var hash = crypto.createHash('sha256');
+		hash.update("" + Math.random());
+		hash.update("" + Date.now());
+		session.id = hash.digest('hex').substr(0, 16).toUpperCase();
+	} while (state.sessions[session.id]);
+	state.sessions[session.id] = session;
+	return session;
 };
 
 Master.prototype.getSession = function (id) {
@@ -134,34 +132,28 @@ Master.prototype.destroySession = function (id) {
 
 Master.prototype.checkClient = function (id) {
 	var state = this;
-	return state.mq.channel.create().then(function (channel) {
-		return new Promise(function (resolve, reject) {
-			var session = state.sessions[id];
-			if (!session) {
-				reject(new Error("Session %s is unknown to master.", id));
-				return;
-			}
-			var queueName = "CHECK_CLIENT.INCOMING";
-			session.lastQueue = queueName;
-			var x = channel.checkQueue(queueName).then(function (x) {
-				var content = JSON.stringify(session);
-				channel.publish("CHECK_CLIENT", "INCOMING", Buffer.from(content, "utf-8"), {
-					persistent: true
-				});
-				resolve();
-			}).catch(function (error) {
-				reject(error);
-				log.error(error);
-			});
+	state.mq.channel.create().then(function (channel) {
+		var session = state.sessions[id];
+		if (!session) {
+			log.debug("Session %s is unknown to master.", id);
+			return;
+		}
+		session.lastQueue = "CHECK_CLIENT.INCOMING";
+		var content = JSON.stringify(session);
+		channel.publish("CHECK_CLIENT", "INCOMING", Buffer.from(content, "utf-8"), {
+			persistent: true
 		});
+	}).catch(function(error) {
+		log.debug('[%s] Error injecting message to queue CHECK_CLIENT.INCOMING: %s', id, error);
+		log.debug(error);
 	});
 };
 
-Master.prototype.processDeadLetters = function(id) {
+Master.prototype.processDeadLetters = function (id) {
 	var state = this;
 	var queueName = strfmt('%s.%s', DEAD_LETTER_EXCHANGE, DEAD_LETTER_QUEUE);
-	var processMessage = function(msg) {
-		state.mq.channel.create().then(function(chan) {
+	var processMessage = function (msg) {
+		state.mq.channel.create().then(function (chan) {
 			chan.ack(msg);
 		});
 		var session;
@@ -171,21 +163,20 @@ Master.prototype.processDeadLetters = function(id) {
 			log.debug('Skipping unparseable dead letter in queue %s: %s', queueName, error);
 			return;
 		}
-		if ( !session || !session.id ) {
+		if (!session || !session.id) {
 			log.debug('Skipping empty session or session without an id in queue %s.');
 			return;
 		}
-		if ( !state.sessions[session.id] ) {
+		if (!state.sessions[session.id]) {
 			log.debug('[%s] Skipping unknown session id in queue %s.', session.id, queueName);
 			return;
 		}
 		session.smtpCallback = state.sessions[session.id].smtpCallback;
 		state.sessions[session.id] = session;
 		log.error('[%s] Entered dead letter queue from last queue %s.', session.id, session.lastQueue);
-		if ( session.smtpCallback ) {
+		if (session.smtpCallback) {
 			try {
-				var reply = new Error('Internal server error, please try later.');
-				reply.responseCode = 421;
+				var reply = smtpError();
 				log.info('[%s] Disconnecting with reply: %d %s', session.id, reply.responseCode, reply.message);
 				session.smtpCallback(reply);
 			} catch (error) {
@@ -195,9 +186,11 @@ Master.prototype.processDeadLetters = function(id) {
 		}
 		state.destroySession(session.id);
 	};
-	return new Promise(function(resolve, reject) {
-		state.mq.channel.create().then(function(chan){
-			chan.consume(queueName, processMessage).catch(function(error) {
+	return new Promise(function (resolve, reject) {
+		state.mq.channel.create().then(function (chan) {
+			var consumer = chan.consume(queueName, processMessage).then(function(consumer) {
+				state.consumers[queueName] = consumer.consumerTag;
+			}).catch(function (error) {
 				log.error('Unable to setup consumer for dead letter queue %s: %s', queueName, error);
 				log.debug(error);
 			});
@@ -213,7 +206,7 @@ Master.prototype.initSmtpServer = function () {
 
 Master.prototype.run = function () {
 	return Promise.when([this.smtpd.start(),
-	this.processDeadLetters()]);
+		this.processDeadLetters()]);
 };
 
 new Master().start();

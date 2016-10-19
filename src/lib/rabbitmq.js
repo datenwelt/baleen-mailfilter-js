@@ -2,7 +2,7 @@ var _ = require('underscore');
 var amqplib = require('amqplib');
 var bunyan = require('bunyan');
 var URI = require('urijs');
-var strfmt = require('util').format;
+//var strfmt = require('util').format;
 
 var log = bunyan.createLogger({name: 'baleen.rabbitmq'});
 log.level(process.env.BALEEN_DEBUG ? 'DEBUG' : 'INFO');
@@ -13,13 +13,6 @@ module.exports.ConfirmChannel = ConfirmChannel;
 
 Connection.prototype.constructor = Connection;
 
-/**
- * Create a new Connection object.
- * @param uri The Connection URI to connect to.
- * @param options Options for the Connection connection.
- * @param log An optional (bunyan-style) logger instance.
- * @constructor
- */
 function Connection() {
 	if (!process.env.BALEEN_RABBITMQ_URI) {
 		throw new Error("Environment variable BALEEN_RABBITMQ_URI is empty. Please set the URI of your Connection instance.");
@@ -29,8 +22,7 @@ function Connection() {
 	} catch (error) {
 		throw new Error('Environment variable BALEEN_RABBITMQ_URI ("%s") cannot be parsed as RabbitMQ URI. Please set the URI of your RabbitMQ instance.');
 	}
-	var state = this;
-	if (!uri.scheme() == "amqp" || uri.scheme() == "amqps") {
+	if (uri.scheme() != "amqp" && uri.scheme() != "amqps") {
 		throw new Error('Environment variable BALEEN_RABBITMQ_URI is not a valid Connection URI. URI must start with "amqp(s)://".');
 	}
 
