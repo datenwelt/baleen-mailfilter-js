@@ -120,12 +120,10 @@ Channel.prototype.create = function () {
 
 Channel.prototype.onError = function (error) {
 	this.channel = undefined;
-	log.debug('Channel for broker %s has been closed with error: %s', this.mq.displayUri, error);
 };
 
 Channel.prototype.onClose = function () {
 	this.channel = undefined;
-	log.debug('Channel for broker %s has been closed.', this.mq.displayUri);
 };
 
 Channel.prototype.close = function () {

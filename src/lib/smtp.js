@@ -163,16 +163,15 @@ Server.prototype.onConnect = function (smtpinfo, ready) {
 			session.id, session.client.info, code, message);
 		var reply = new Error(state.suspend.message);
 		reply.responseCode = this.suspend.code;
-		state.master.destroySession().then(function () {
-			delete state.sessions[smtpinfo.id];
-			ready(reply);
-		});
+		state.master.destroySession();
+		delete state.sessions[smtpinfo.id];
+		ready(reply);
 	}
 	session.smtpInfo = smtpinfo;
 	session.smtpCallback = ready;
 	log.info('[%s] Connect from client %s.', session.id, client.info);
 	try {
-		state.master.checkClient(session.id);
+		state.master.checkClient(session.id, ready);
 	} catch(error) {
 		log.debug('[%s] Error checking client of message: %s', session.id, error);
 		log.debug(error);
@@ -194,5 +193,9 @@ function smtpError() {
 	});
 	var smtpError = new Error(message);
 	smtpError.responseCode = code;
+	smtpError.log = function(id) {
+		log.info('[%s] Disconnecting with reply: %d %s', id, this.responseCode, this.message);
+		return this;
+	};
 	return smtpError;
 }

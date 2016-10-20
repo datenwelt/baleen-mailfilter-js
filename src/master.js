@@ -11,7 +11,9 @@ var SMTPServer = require('./lib/smtp.js').Server;
 var smtpError = require('./lib/smtp.js').smtpError;
 
 var EXCHANGES = ['CHECK_CLIENT', 'CHECK_SENDER', 'CHECK_RECIPIENT', 'CHECK_MESSAGE'];
-var QUEUES = ['DEFER', 'DELIVER', 'DISCARD', 'INCOMING', 'REJECT'];
+var INCOMING_QUEUE = process.env.BALEEN_INCOMING_QUEUE || 'INCOMING';
+var MASTER_EXCHANGE = 'MASTER';
+var MASTER_QUEUES = ['DEFER', 'DELIVER', 'DISCARD', 'REJECT'];
 var DEAD_LETTER_EXCHANGE = 'DEAD_LETTERS';
 var DEAD_LETTER_QUEUE = 'HOLD';
 
@@ -54,27 +56,22 @@ Master.prototype.initMQ = function () {
 		state.mq.channel = channel;
 		return channel.create().then(function (chan) {
 			var asserts = _.map(EXCHANGES, function (exchange) {
+				log.debug('Using %s as initial routing key for new messages in exchange %s.', INCOMING_QUEUE, exchange);
 				log.debug('Asserting existence of exchange %s at %s', exchange, channel.uri);
 				return chan.assertExchange(exchange, 'direct', {durable: true});
 			});
+			log.debug('Asserting existence of master exchange %s at %s', MASTER_EXCHANGE, channel.uri);
+			asserts.push(chan.assertExchange(MASTER_EXCHANGE, 'direct', {durable: true}));
 			log.debug('Asserting existence of dead letter exchange %s at %s', DEAD_LETTER_EXCHANGE, channel.uri);
 			asserts.push(chan.assertExchange(DEAD_LETTER_EXCHANGE, 'fanout', {durable: true}));
 			return Promise.when(asserts);
 		}).then(function () {
 			return channel.create().then(function (chan) {
 				var asserts = [];
-				_.each(EXCHANGES, function (exchange) {
-					_.each(QUEUES, function (queue) {
-						queue = strfmt('%s.%s', exchange, queue);
-						log.debug('Asserting existence of queue %s in exchange %s at %s.', queue, exchange, channel.uri);
-						asserts.push(chan.assertQueue(queue, {
-							'durable': true,
-							arguments: {
-								'x-message-ttl': 15000,
-								'x-dead-letter-exchange': DEAD_LETTER_EXCHANGE
-							}
-						}));
-					});
+				_.each(MASTER_QUEUES, function (queue) {
+					queue = strfmt('%s.%s', MASTER_EXCHANGE, queue);
+					log.debug('Asserting existence of queue %s in exchange %s at %s.', queue, MASTER_EXCHANGE, channel.uri);
+					asserts.push(chan.assertQueue(queue, {durable: true}));
 				});
 				asserts.push(chan.assertQueue(strfmt('%s.%s', DEAD_LETTER_EXCHANGE, DEAD_LETTER_QUEUE), {durable: true}));
 				return Promise.when(asserts);
@@ -82,13 +79,11 @@ Master.prototype.initMQ = function () {
 		}).then(function () {
 			return channel.create().then(function (chan) {
 				var bindings = [];
-				_.each(EXCHANGES, function (exchange) {
-					_.each(QUEUES, function (queue) {
-						var routingKey = queue;
-						queue = strfmt('%s.%s', exchange, queue);
-						log.debug('Binding routing key %s to queue %s.', routingKey, queue);
-						bindings.push(chan.bindQueue(queue, exchange, routingKey));
-					});
+				_.each(MASTER_QUEUES, function (queue) {
+					var routingKey = queue;
+					queue = strfmt('%s.%s', MASTER_EXCHANGE, queue);
+					log.debug('Binding routing key %s to queue %s.', routingKey, queue);
+					bindings.push(chan.bindQueue(queue, MASTER_EXCHANGE, routingKey));
 				});
 				var deadLetterQueueName = strfmt('%s.%s', DEAD_LETTER_EXCHANGE, DEAD_LETTER_QUEUE);
 				log.debug('Binding routing key %s to queue %s.', DEAD_LETTER_QUEUE, deadLetterQueueName);
@@ -130,30 +125,39 @@ Master.prototype.destroySession = function (id) {
 	});
 };
 
-Master.prototype.checkClient = function (id) {
+Master.prototype.checkClient = function (id, smtpCallback) {
 	var state = this;
 	state.mq.channel.create().then(function (channel) {
 		var session = state.sessions[id];
 		if (!session) {
 			log.debug("Session %s is unknown to master.", id);
+			smtpCallback(smtpError().log(id));
 			return;
 		}
-		session.lastQueue = "CHECK_CLIENT.INCOMING";
-		var content = JSON.stringify(session);
-		channel.publish("CHECK_CLIENT", "INCOMING", Buffer.from(content, "utf-8"), {
-			persistent: true
+		var queue = strfmt('CHECK_CLIENT.%s', INCOMING_QUEUE);
+		channel.checkQueue(queue).then(function () {
+			session.lastQueue = queue;
+			var content = JSON.stringify(session);
+			channel.publish("CHECK_CLIENT", INCOMING_QUEUE, Buffer.from(content, "utf-8"), {
+				persistent: true
+			});
+		}).catch(function (error) {
+			log.debug('[%s] Queue %s not available, skipping client check: %s', id, queue, error);
+			smtpCallback();
 		});
-	}).catch(function(error) {
+	}).catch(function (error) {
 		log.debug('[%s] Error injecting message to queue CHECK_CLIENT.INCOMING: %s', id, error);
 		log.debug(error);
+		smtpCallback(smtpError().log(id));
 	});
 };
 
 Master.prototype.processDeadLetters = function (id) {
 	var state = this;
 	var queueName = strfmt('%s.%s', DEAD_LETTER_EXCHANGE, DEAD_LETTER_QUEUE);
+	var consumerChannel = new ConfirmChannel();
 	var processMessage = function (msg) {
-		state.mq.channel.create().then(function (chan) {
+		consumerChannel.create().then(function (chan) {
 			chan.ack(msg);
 		});
 		var session;
@@ -174,6 +178,10 @@ Master.prototype.processDeadLetters = function (id) {
 		session.smtpCallback = state.sessions[session.id].smtpCallback;
 		state.sessions[session.id] = session;
 		log.error('[%s] Entered dead letter queue from last queue %s.', session.id, session.lastQueue);
+		log.debug('Removing stale queue %s.', session.lastQueue);
+		consumerChannel.create().then(function (channel) {
+			channel.deleteQueue(session.lastQueue);
+		});
 		if (session.smtpCallback) {
 			try {
 				var reply = smtpError();
@@ -186,13 +194,32 @@ Master.prototype.processDeadLetters = function (id) {
 		}
 		state.destroySession(session.id);
 	};
-	return new Promise(function (resolve, reject) {
-		state.mq.channel.create().then(function (chan) {
-			var consumer = chan.consume(queueName, processMessage).then(function(consumer) {
+	var createConsumer = function (channel) {
+		return new Promise(function (resolve, reject) {
+			channel.consume(queueName, processMessage).then(function (consumer) {
+				channel.on('close', function() {
+					log.debug('Restarting consumer for DEAD_LETTERS.');
+					// Restart the consumer, if the channel closes.
+					// TODO: Croak if the consumer cannot be started.
+					consumerChannel.create().then(function(newChannel) {
+						createConsumer(newChannel);
+					});
+				});
 				state.consumers[queueName] = consumer.consumerTag;
+				resolve();
 			}).catch(function (error) {
 				log.error('Unable to setup consumer for dead letter queue %s: %s', queueName, error);
 				log.debug(error);
+				reject(error);
+			});
+		});
+	};
+	return new Promise(function () {
+		consumerChannel.create().then(function (chan) {
+			return createConsumer(chan).then(function() {
+				resolve();
+			}).catch(function(error) {
+				reject(error);
 			});
 		});
 	});
