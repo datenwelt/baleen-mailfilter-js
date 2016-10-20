@@ -100,6 +100,16 @@ Master.prototype.initMQ = function () {
 	});
 };
 
+Master.prototype.shutdown = function (reason) {
+	if (reason instanceof Error) {
+		log.info('Shutting down master process due to error: %s', reason);
+		log.debug(reason);
+	} else {
+		log.info('Shutting down master process. Reason: %s', reason);
+	}
+	process.exit(1);
+};
+
 Master.prototype.createSession = function () {
 	var state = this;
 	var session = {};
@@ -152,77 +162,83 @@ Master.prototype.checkClient = function (id, smtpCallback) {
 	});
 };
 
-Master.prototype.processDeadLetters = function (id) {
+Master.prototype.startConsumer = function (queue, processFn) {
 	var state = this;
-	var queueName = strfmt('%s.%s', DEAD_LETTER_EXCHANGE, DEAD_LETTER_QUEUE);
-	var consumerChannel = new ConfirmChannel();
-	var processMessage = function (msg) {
-		consumerChannel.create().then(function (chan) {
-			chan.ack(msg);
-		});
-		var session;
-		try {
-			session = JSON.parse(msg.content.toString());
-		} catch (error) {
-			log.debug('Skipping unparseable dead letter in queue %s: %s', queueName, error);
-			return;
-		}
-		if (!session || !session.id) {
-			log.debug('Skipping empty session or session without an id in queue %s.');
-			return;
-		}
-		if (!state.sessions[session.id]) {
-			log.debug('[%s] Skipping unknown session id in queue %s.', session.id, queueName);
-			return;
-		}
-		session.smtpCallback = state.sessions[session.id].smtpCallback;
-		state.sessions[session.id] = session;
-		log.error('[%s] Entered dead letter queue from last queue %s.', session.id, session.lastQueue);
-		log.debug('Removing stale queue %s.', session.lastQueue);
+	return new Promise(function (resolve, reject) {
+		var consumerChannel = new ConfirmChannel();
 		consumerChannel.create().then(function (channel) {
-			channel.deleteQueue(session.lastQueue);
-		});
-		if (session.smtpCallback) {
-			try {
-				var reply = smtpError();
-				log.info('[%s] Disconnecting with reply: %d %s', session.id, reply.responseCode, reply.message);
-				session.smtpCallback(reply);
-			} catch (error) {
-				log.debug('[%s] Error in smtp callback: %s', error);
-				log.debug(error);
-			}
-		}
-		state.destroySession(session.id);
-	};
-	var createConsumer = function (channel) {
-		return new Promise(function (resolve, reject) {
-			channel.consume(queueName, processMessage).then(function (consumer) {
-				channel.on('close', function() {
-					log.debug('Restarting consumer for DEAD_LETTERS.');
-					// Restart the consumer, if the channel closes.
-					// TODO: Croak if the consumer cannot be started.
-					consumerChannel.create().then(function(newChannel) {
-						createConsumer(newChannel);
-					});
+			processFn = _.bind(processFn, state, channel);
+			channel.consume(queue, processFn).then(function (consumer) {
+				channel.on('close', function () {
+					log.debug('Consumer for queue %s has been closed.');
+					state.shutdown(strfmt('Consumer for queue %s has been closed.', queue));
 				});
-				state.consumers[queueName] = consumer.consumerTag;
+				channel.on('error', function (error) {
+					log.debug('Error in consumer for queue %s: %s', error);
+					log.debug(error);
+				});
+				state.consumers[queue] = {
+					consumerTag: consumer.consumerTag,
+					consumerChannel: channel
+				};
 				resolve();
 			}).catch(function (error) {
-				log.error('Unable to setup consumer for dead letter queue %s: %s', queueName, error);
+				log.error('Unable to setup consumer for dead letter queue %s: %s', queue, error);
 				log.debug(error);
 				reject(error);
 			});
-		});
-	};
-	return new Promise(function () {
-		consumerChannel.create().then(function (chan) {
-			return createConsumer(chan).then(function() {
-				resolve();
-			}).catch(function(error) {
-				reject(error);
-			});
+		}).catch(function (error) {
+			log.error('Unable to setup consumer for dead letter queue %s: %s', queue, error);
+			reject(error);
 		});
 	});
+};
+
+Master.prototype.processDeadLetter = function (channel, msg) {
+	var state = this;
+	var queueName = strfmt('%s.%s', DEAD_LETTER_EXCHANGE, DEAD_LETTER_QUEUE);
+	try {
+		channel.ack(msg);
+	} catch (error) {
+		log.debug('Unable to acknowledge message in queue %s: %s', queueName, error);
+		log.debug(error);
+	}
+	var session;
+	try {
+		session = JSON.parse(msg.content.toString());
+	} catch (error) {
+		log.debug('Skipping unparseable dead letter in queue %s: %s', queueName, error);
+		return;
+	}
+	if (!session || !session.id) {
+		log.debug('Skipping empty session or session without an id in queue %s.');
+		return;
+	}
+	if (!state.sessions[session.id]) {
+		log.debug('[%s] Skipping unknown session id in queue %s.', session.id, queueName);
+		return;
+	}
+	session.smtpCallback = state.sessions[session.id].smtpCallback;
+	state.sessions[session.id] = session;
+	log.error('[%s] Entered dead letter queue from last queue %s.', session.id, session.lastQueue);
+	log.debug('Removing stale queue %s.', session.lastQueue);
+	try {
+		channel.deleteQueue(session.lastQueue);
+	} catch (error) {
+		log.debug('Unable to acknowledge message in queue %s: %s', queueName, error);
+		log.debug(error);
+	}
+	if (session.smtpCallback) {
+		try {
+			var reply = smtpError();
+			log.info('[%s] Disconnecting with reply: %d %s', session.id, reply.responseCode, reply.message);
+			session.smtpCallback(reply);
+		} catch (error) {
+			log.debug('[%s] Error in smtp callback: %s', error);
+			log.debug(error);
+		}
+	}
+	state.destroySession(session.id);
 };
 
 
@@ -232,8 +248,12 @@ Master.prototype.initSmtpServer = function () {
 };
 
 Master.prototype.run = function () {
-	return Promise.when([this.smtpd.start(),
-		this.processDeadLetters()]);
+	var processes = [];
+	processes.push(this.smtpd.start());
+	var queue = strfmt('%s.%s', DEAD_LETTER_EXCHANGE, DEAD_LETTER_QUEUE);
+	processes.push(this.startConsumer(queue, this.processDeadLetter));
+
+	return Promise.when(processes);
 };
 
 new Master().start();
