@@ -13,7 +13,10 @@ module.exports.ConfirmChannel = ConfirmChannel;
 
 Connection.prototype.constructor = Connection;
 
+var LAST_ID = 1;
+
 function Connection() {
+	this.id = LAST_ID++;
 	if (!process.env.BALEEN_RABBITMQ_URI) {
 		throw new Error("Environment variable BALEEN_RABBITMQ_URI is empty. Please set the URI of your Connection instance.");
 	}
@@ -33,6 +36,7 @@ function Connection() {
 	if (this.displayUri.password()) {
 		this.displayUri.password('xxx');
 	}
+	this.displayUri = this.displayUri.toString() +  "#" + this.id;
 	this.conn = undefined;
 }
 
@@ -79,9 +83,11 @@ Connection.prototype.onError = function (error) {
 
 Channel.prototype.constructor = Channel;
 
+var LAST_CHANNEL_ID;
 function Channel() {
 	this.mq = new Connection();
-	this.uri = this.mq.displayUri.toString();
+	this.id = LAST_CHANNEL_ID++;
+	this.uri = this.mq.displayUri + "#chan" + this.id;
 	this.channel = undefined;
 	this.confirm = false;
 }

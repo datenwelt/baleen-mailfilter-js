@@ -40,7 +40,9 @@ Server.prototype.start = function () {
 	var options = {
 		disabledCommands: 'AUTH',
 		useXForward: true,
-		onConnect: _.bind(state.onConnect, state)
+		onConnect: _.bind(state.onConnect, state),
+		onMailFrom: _.bind(state.onMailFrom, state),
+		onRcptTo: _.bind(state.onRcptTo, state),
 		//onData: _.bind(onData, state)
 	};
 	return new Promise(function (resolve, reject) {
@@ -172,28 +174,86 @@ Server.prototype.onConnect = function (smtpinfo, ready) {
 	log.info('[%s] Connect from client %s.', session.id, client.info);
 	try {
 		state.master.checkClient(session.id, ready);
-	} catch(error) {
+	} catch (error) {
 		log.debug('[%s] Error checking client of message: %s', session.id, error);
 		log.debug(error);
 		state.master.destroySession(session.id);
-		reply(smtpError());
+		ready(smtpError());
+	}
+};
+
+Server.prototype.onMailFrom = function (address, smtpinfo, ready) {
+	var state = this;
+	var sessionId = state.sessions[smtpinfo.id];
+	if ( !sessionId ) {
+		log.debug('Skipping unknown smtp session id: %s', smtpinfo.id);
+		ready(smtpError().log());
+		return;
+	}
+	var session = state.master.getSession(sessionId);
+	if ( !session ) {
+		log.debug('Skipping unknown session: %s', sessionId);
+		ready(smtpError().log());
+		return;
+	}
+	session.sender = address.address;
+	session.smtpInfo = smtpinfo;
+	session.smtpCallback = ready;
+	log.info('[%s] from=%s args=%j', session.id, session.sender, address.args);
+	try {
+		state.master.checkSender(session.id, ready);
+	} catch (error) {
+		log.debug('[%s] Error checking sender of message: %s', session.id, error);
+		log.debug(error);
+		state.master.destroySession(session.id);
+		ready(smtpError());
+	}
+};
+
+Server.prototype.onRcptTo = function (address, smtpinfo, ready) {
+	var state = this;
+	var sessionId = state.sessions[smtpinfo.id];
+	if ( !sessionId ) {
+		log.debug('Skipping unknown smtp session id: %s', smtpinfo.id);
+		ready(smtpError().log());
+		return;
+	}
+	var session = state.master.getSession(sessionId);
+	if ( !session ) {
+		log.debug('Skipping unknown session: %s', sessionId);
+		ready(smtpError().log());
+		return;
+	}
+	session.recipient = address.address;
+	session.recipients = session.recipients || [];
+	session.recipients.push(address.address);
+	session.smtpInfo = smtpinfo;
+	session.smtpCallback = ready;
+	log.info('[%s] to=%s args=%j', session.id, session.recipient, address.args);
+	try {
+		state.master.checkRecipient(session.id, ready);
+	} catch (error) {
+		log.debug('[%s] Error checking recipient of message: %s', session.id, error);
+		log.debug(error);
+		state.master.destroySession(session.id);
+		ready(smtpError());
 	}
 };
 
 function smtpError() {
 	var message = 'Transient internal server error. Please try again later.';
 	var code = 421;
-	_.each(arguments, function(arg) {
-		if ( _.isString(arg) ) {
+	_.each(arguments, function (arg) {
+		if (_.isString(arg)) {
 			message = arg;
 		}
-		if ( _.isNumber(arg) && arg > 0 ) {
+		if (_.isNumber(arg) && arg > 0) {
 			code = arg;
 		}
 	});
 	var smtpError = new Error(message);
 	smtpError.responseCode = code;
-	smtpError.log = function(id) {
+	smtpError.log = function (id) {
 		log.info('[%s] Disconnecting with reply: %d %s', id, this.responseCode, this.message);
 		return this;
 	};

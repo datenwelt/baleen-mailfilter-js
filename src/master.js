@@ -135,7 +135,7 @@ Master.prototype.destroySession = function (id) {
 	});
 };
 
-Master.prototype.checkClient = function (id, smtpCallback) {
+Master.prototype._injectSessionForCheck = function (id, exchange, smtpCallback) {
 	var state = this;
 	state.mq.channel.create().then(function (channel) {
 		var session = state.sessions[id];
@@ -144,22 +144,40 @@ Master.prototype.checkClient = function (id, smtpCallback) {
 			smtpCallback(smtpError().log(id));
 			return;
 		}
-		var queue = strfmt('CHECK_CLIENT.%s', INCOMING_QUEUE);
+		var queue = strfmt('%s.%s', exchange, INCOMING_QUEUE);
 		channel.checkQueue(queue).then(function () {
 			session.lastQueue = queue;
 			var content = JSON.stringify(session);
-			channel.publish("CHECK_CLIENT", INCOMING_QUEUE, Buffer.from(content, "utf-8"), {
+			channel.publish(exchange, INCOMING_QUEUE, Buffer.from(content, "utf-8"), {
 				persistent: true
 			});
 		}).catch(function (error) {
-			log.debug('[%s] Queue %s not available, skipping client check: %s', id, queue, error);
-			smtpCallback();
+			log.debug('[%s] Queue %s not available, skipping the corresponding check: %s', id, queue, error);
+			session.lastQueue = queue;
+			var content = JSON.stringify(session);
+			state.mq.channel.create().then(function(channel) {
+				channel.publish("MASTER", "DELIVER", Buffer.from(content, "utf-8"), {
+					persistent: true
+				});
+			});
 		});
 	}).catch(function (error) {
-		log.debug('[%s] Error injecting message to queue CHECK_CLIENT.INCOMING: %s', id, error);
+		log.debug('[%s] Error injecting message to queue %s.%s: %s', exchange, INCOMING_QUEUE, id, error);
 		log.debug(error);
 		smtpCallback(smtpError().log(id));
 	});
+};
+
+Master.prototype.checkClient = function (id, smtpCallback) {
+	this._injectSessionForCheck(id, "CHECK_CLIENT", smtpCallback);
+};
+
+Master.prototype.checkSender = function (id, smtpCallback) {
+	this._injectSessionForCheck(id, "CHECK_SENDER", smtpCallback);
+};
+
+Master.prototype.checkRecipient = function (id, smtpCallback) {
+	this._injectSessionForCheck(id, "CHECK_RECIPIENT", smtpCallback);
 };
 
 Master.prototype.startConsumer = function (queue, processFn) {
@@ -167,10 +185,11 @@ Master.prototype.startConsumer = function (queue, processFn) {
 	return new Promise(function (resolve, reject) {
 		var consumerChannel = new ConfirmChannel();
 		consumerChannel.create().then(function (channel) {
+			log.debug('Starting consumer for queue %s at %s.', queue, consumerChannel.mq.displayUri);
 			processFn = _.bind(processFn, state, channel);
 			channel.consume(queue, processFn).then(function (consumer) {
 				channel.on('close', function () {
-					log.debug('Consumer for queue %s has been closed.');
+					log.debug('Consumer for queue %s has been closed.', queue);
 					state.shutdown(strfmt('Consumer for queue %s has been closed.', queue));
 				});
 				channel.on('error', function (error) {
@@ -194,32 +213,135 @@ Master.prototype.startConsumer = function (queue, processFn) {
 	});
 };
 
-Master.prototype.processDeadLetter = function (channel, msg) {
+Master.prototype._processConsumerMessage = function (channel, queueName, msg) {
 	var state = this;
-	var queueName = strfmt('%s.%s', DEAD_LETTER_EXCHANGE, DEAD_LETTER_QUEUE);
 	try {
 		channel.ack(msg);
 	} catch (error) {
 		log.debug('Unable to acknowledge message in queue %s: %s', queueName, error);
 		log.debug(error);
+		return undefined;
 	}
 	var session;
 	try {
 		session = JSON.parse(msg.content.toString());
 	} catch (error) {
-		log.debug('Skipping unparseable dead letter in queue %s: %s', queueName, error);
-		return;
+		log.debug('Skipping unparseable message in queue %s: %s', queueName, error);
+		return undefined;
 	}
 	if (!session || !session.id) {
 		log.debug('Skipping empty session or session without an id in queue %s.');
-		return;
+		return undefined;
 	}
 	if (!state.sessions[session.id]) {
 		log.debug('[%s] Skipping unknown session id in queue %s.', session.id, queueName);
-		return;
+		return undefined;
 	}
 	session.smtpCallback = state.sessions[session.id].smtpCallback;
+	if (!session.smtpCallback) {
+		log.debug('[%s] No smtp server callback function stored with this session.');
+		return undefined;
+	}
 	state.sessions[session.id] = session;
+	return session;
+};
+
+Master.prototype.processReject = function (channel, msg) {
+	var state = this;
+	var queueName = strfmt('%s.%s', MASTER_EXCHANGE, 'REJECT');
+	var session = state._processConsumerMessage(channel, queueName, msg);
+	if (!session) {
+		return;
+	}
+	var responseCode = session.responseCode || 554;
+	var responseMessage = session.responseMessage || 'Transaction failed';
+	var rejectReason = session.status;
+	log.debug('[%s] Message rejected by queue %s: %s', session.id, queueName, rejectReason);
+	try {
+		var reply = smtpError(responseCode, responseMessage).log();
+		session.smtpCallback(reply);
+	} catch (error) {
+		log.debug('[%s] Error in smtp callback: %s', error);
+		log.debug(error);
+	}
+	state.destroySession(session.id);
+};
+
+Master.prototype.processDiscard = function (channel, msg) {
+	var state = this;
+	var queueName = strfmt('%s.%s', MASTER_EXCHANGE, 'DISCARD');
+	var session = state._processConsumerMessage(channel, queueName, msg);
+	if (!session) {
+		return;
+	}
+	var discardReason = session.status;
+	log.debug('[%s] Message discarded by queue %s: %s', session.id, queueName, discardReason);
+	try {
+		session.smtpCallback();
+	} catch (error) {
+		log.debug('[%s] Error in smtp callback: %s', error);
+		log.debug(error);
+	}
+	state.destroySession(session.id);
+};
+
+Master.prototype.processDefer = function (channel, msg) {
+	var state = this;
+	var queueName = strfmt('%s.%s', MASTER_EXCHANGE, 'DEFER');
+	var session = state._processConsumerMessage(channel, queueName, msg);
+	if (!session) {
+		return;
+	}
+	var responseCode = session.responseCode || 421;
+	var responseMessage = session.responseMessage || 'Message temporarily deferred.';
+	var deferReason = session.status;
+	log.debug('[%s] Message deferred by queue %s: %s', session.id, queueName, deferReason);
+	try {
+		var reply = smtpError(responseCode, responseMessage).log();
+		session.smtpCallback(reply);
+	} catch (error) {
+		log.debug('[%s] Error in smtp callback: %s', error);
+		log.debug(error);
+	}
+	state.destroySession(session.id);
+};
+
+Master.prototype.processDeliver = function(channel, msg) {
+	var state = this;
+	var queueName = strfmt('%s.%s', MASTER_EXCHANGE, 'DELIVER');
+	var session = state._processConsumerMessage(channel, queueName, msg);
+	if (!session) {
+		return;
+	}
+	var lastQueue = session.lastQueue;
+	var matches = /([^\.]+)\..+/.exec(lastQueue);
+	if ( !matches ) {
+		log.debug('[%s] Invalid format for { session.lastQueue }: %s', session.id, lastQueue);
+		session.smtpCallback(smtpError().log());
+		return;
+	}
+	var exchange = matches[1];
+	var index = _.indexOf(EXCHANGES, exchange);
+	if ( index == -1 ) {
+		log.debug('[%s] Unknown exchange %s in session.lastQueue when processing delivery of message.', session.id, session.lastQueue);
+		session.smtpCallback(smtpError().log());
+		return;
+	}
+	if ( _.last(EXCHANGES) == exchange ) {
+		log.info("[%s] Delivering message downstream.");
+	} else {
+		log.debug('[%s] Delivering message to next processing stage from %s.', session.id, queueName);
+	}
+	session.smtpCallback();
+};
+
+Master.prototype.processDeadLetter = function (channel, msg) {
+	var state = this;
+	var queueName = strfmt('%s.%s', DEAD_LETTER_EXCHANGE, DEAD_LETTER_QUEUE);
+	var session = state._processConsumerMessage(channel, queueName, msg);
+	if (!session) {
+		return;
+	}
 	log.error('[%s] Entered dead letter queue from last queue %s.', session.id, session.lastQueue);
 	log.debug('Removing stale queue %s.', session.lastQueue);
 	try {
@@ -252,7 +374,14 @@ Master.prototype.run = function () {
 	processes.push(this.smtpd.start());
 	var queue = strfmt('%s.%s', DEAD_LETTER_EXCHANGE, DEAD_LETTER_QUEUE);
 	processes.push(this.startConsumer(queue, this.processDeadLetter));
-
+	queue = strfmt('%s.%s', MASTER_EXCHANGE, 'REJECT');
+	processes.push(this.startConsumer(queue, this.processReject));
+	queue = strfmt('%s.%s', MASTER_EXCHANGE, 'DEFER');
+	processes.push(this.startConsumer(queue, this.processDefer));
+	queue = strfmt('%s.%s', MASTER_EXCHANGE, 'DISCARD');
+	processes.push(this.startConsumer(queue, this.processDiscard));
+	queue = strfmt('%s.%s', MASTER_EXCHANGE, 'DELIVER');
+	processes.push(this.startConsumer(queue, this.processDeliver));
 	return Promise.when(processes);
 };
 
