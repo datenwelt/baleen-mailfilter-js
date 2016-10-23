@@ -59,7 +59,7 @@ Master.prototype.initMQ = function () {
 	var state = this;
 	state.mq = {};
 	return new Promise(function (resolve, reject) {
-		log.debug('Initializing message queue at %s.', process.env.BALEEN_RABBITMQ_URI);
+		log.debug('Initializing message queue.');
 		var channel = new ConfirmChannel();
 		state.mq.channel = channel;
 		return channel.create().then(function (chan) {
@@ -376,11 +376,17 @@ Master.prototype.processDeliver = function(channel, msg) {
 		return;
 	}
 	if ( _.last(EXCHANGES) == exchange ) {
-		log.info("[%s] Delivering message downstream.", session.id);
+		state.smtpd.relay(session.id).then(function() {
+			log.info("[%s] Successfully delivered message.", session.id);
+			session.smtpCallback();
+		}).catch(function(error) {
+			log.info("[%s] Delivery of message failed.", session.id);
+			session.smtpCallback(smtpError().log());
+		});
 	} else {
 		log.debug('[%s] Delivering message to next processing stage from %s.', session.id, queueName);
+		session.smtpCallback();
 	}
-	session.smtpCallback();
 };
 
 Master.prototype.processDeadLetter = function (channel, msg) {

@@ -1,8 +1,10 @@
-var Buffer = require('buffer');
+var Buffer = require('buffer').Buffer;
 var bunyan = require('bunyan');
 var crypto = require('crypto');
+var SMTPConnection = require('smtp-connection');
 var SMTPServer = require('smtp-server').SMTPServer;
 var strfmt = require('util').format;
+var URI = require('urijs');
 var _ = require('underscore');
 
 module.exports.Server = Server;
@@ -200,28 +202,28 @@ Server.prototype.onData = function (stream, smtpinfo, ready) {
 	}
 	var buffers = [];
 	var bufferTotal = 0;
-	stream.on('close', function() {
+	stream.on('close', function () {
 		log.debug('[%s] Content stream was closed unexpectedly.', session.id);
 		stream.removeAllListeners();
 		ready(smtpError().log());
 	});
-	stream.on('error', function(error) {
+	stream.on('error', function (error) {
 		log.debug('[%s] Error in content stream: %s', session.id, error);
 		stream.removeAllListeners();
 		ready(smtpError().log());
 	});
-	stream.on('end', function() {
+	stream.on('end', function () {
 		log.info('[%s] Received %d bytes of message data.', session.id, bufferTotal);
 		var content = Buffer.alloc(bufferTotal);
 		var pos = 0;
-		_.each(buffers, function(buffer) {
+		_.each(buffers, function (buffer) {
 			buffer.copy(content, pos);
 			pos += buffer.length;
 		});
 		session.content = content.toString('utf8');
 		state.master.checkMessage(session.id, ready);
 	});
-	stream.on('data', function(buffer) {
+	stream.on('data', function (buffer) {
 		buffers.push(buffer);
 		bufferTotal += buffer.length;
 	});
@@ -230,22 +232,101 @@ Server.prototype.onData = function (stream, smtpinfo, ready) {
 	session.smtpCallback = ready;
 };
 
-Server.prototype.onClose = function(smtpinfo) {
+Server.prototype.onClose = function (smtpinfo) {
 	var state = this;
 	var sessionId = state.sessions[smtpinfo.id];
 	if (!sessionId) {
-		log.debug('Skipping unknown smtp session id: %s', smtpinfo.id);
+		log.debug('Unable to close unknown smtp session id: %s', smtpinfo.id);
 		ready(smtpError().log());
 		return;
 	}
 	var session = state.master.getSession(sessionId);
 	if (!session) {
-		log.debug('Skipping unknown session: %s', sessionId);
+		log.debug('Unable to close unknown session: %s', sessionId);
 		ready(smtpError().log());
 		return;
 	}
 	state.master.destroySession(session.id);
 	log.info('[%s] Client connection closed.', session.id);
+};
+
+Server.prototype.relay = function (id) {
+	var state = this;
+	var session = state.master.getSession(id);
+	return new Promise(function (resolve, reject) {
+		if (!session) {
+			log.debug('Unable to relay message for unknown session: %s', id);
+			reject("Relaying failed due to local errors.");
+			return;
+		}
+		var uri = process.env.BALEEN_SMTPOUT_URI || "localhost:10029";
+		try {
+			uri = new URI(uri);
+		} catch (error) {
+			log.error('[%s] Unable to relay message, unparseable URI for outgoing STMP server: %s', id, error);
+			log.debug(error);
+			reject("Relaying failed due to local errors.");
+			return;
+		}
+		var server = uri.hostname();
+		var port = uri.port() || 25;
+		var username = uri.username();
+		var password = uri.password();
+		var connection = new SMTPConnection({
+			host: server,
+			port: port,
+			opportunisticTls: true,
+			authMethod: 'CRAM-MD5',
+			tls : { rejectUnauthorized: false },
+			debug: true,
+			logger: log
+		});
+		connection.on('error', function(error) {
+			log.error('[%s] Unable to relay message. Error during SMTP connection: %s', id, error);
+			log.debug(error);
+			reject("Relaying failed due to SMTP error: " + error);
+			connection.quit();
+		});
+		connection.connect(function() {
+			var transmitMessage = function() {
+				var envelope = {};
+				envelope.from = session.from;
+				envelope.to = session.recipients;
+				envelope.size = session.content.length;
+				connection.send(envelope, session.content, function(err, info) {
+					if ( err ) {
+						var smtpMsg = strfmt('%d %s', err.responseCode, err.response);
+						log.error('[%s] Unable to relay message. Remote server said: %s', id, smtpMsg);
+						log.debug(err);
+						reject(err);
+					} else {
+						log.info('[%s] Relayed to %s:%d: %s', id, server, port, info.response);
+						if ( info.rejected && info.rejected.length ) {
+							_.each(info.rejected, function(addr, idx) {
+								var msg = strfmt('[%s] rcpt=%s, rejected=%s', id, addr, info.rejectedErrors[idx]);
+								log.info(msg);
+							});
+						}
+						resolve();
+					}
+					connection.quit();
+				});
+			};
+			if ( username ) {
+				connection.login({ user: username, pass: password}, function(err) {
+					if ( err ) {
+						log.error('[%s] Unable to relay message. Authentication with remote server failed: %s', id, err);
+						reject(err);
+						connection.close();
+						return;
+					}
+					transmitMessage();
+				});
+			} else {
+				transmitMessage();
+			}
+		});
+	});
 };
 
 function smtpError() {
