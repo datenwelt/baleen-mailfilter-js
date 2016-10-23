@@ -16,7 +16,6 @@ Server.prototype.constructor = Server;
 function Server(master) {
 	this.sessions = {};
 	this.master = master;
-	this.suspended = false;
 	return this;
 }
 
@@ -76,53 +75,9 @@ Server.prototype.start = function () {
 	});
 };
 
-Server.prototype.stop = function () {
-	this._cleanup();
-};
-
-Server.prototype.suspend = function (message, code) {
-	var state = this;
-	if (!this.smtpd || !this.smtpd.server) {
-		return Promise.resolve(this);
-	}
-	message = message || 'Server is currently undergoing an unscheduled maintenance. Please try again later.';
-	code = code || 421;
-	return new Promise(function (resolve) {
-		log.info('Smtp server suspended with message: %d %s', code, message);
-		state.suspended = {
-			message: message,
-			code: code
-		};
-		resolve(state);
-	});
-
-};
-
-Server.prototype.resume = function () {
-	if (this.suspended) {
-		log.info('Smtp server resumed after suspension.');
-		delete this.suspended;
-	}
-	return Promise.resolve(this);
-};
-
-Server.prototype._cleanup = function () {
-	var state = this;
-	if (state.smtpd) {
-		if (state.smtpd.server) {
-			state.smtpd.server.close(function (server) {
-				server.removeListener('close', state.smtpd.onClose);
-				server.removeListener('error', state.smtpd.onError);
-			});
-			delete state.smtpd.server;
-		}
-		delete state.smtpd;
-	}
-};
-
 Server.prototype.onError = function (error) {
 	log.debug('Closing smtp server on error: %s', error);
-	this._cleanup();
+	this.master.shutdown();
 };
 
 Server.prototype.onClose = function () {
@@ -131,7 +86,7 @@ Server.prototype.onClose = function () {
 	this.smtpd.server.removeListener('error', this.smtpd.onError);
 	delete this.smtpd.server;
 	delete this.smtpd;
-	this._cleanup();
+	this.master.shutdown();
 };
 
 /**
@@ -158,18 +113,6 @@ Server.prototype.onConnect = function (smtpinfo, ready) {
 	var session = state.master.createSession();
 	state.sessions[smtpinfo.id] = session.id;
 	session.client = client;
-
-	if (state.suspended) {
-		var message = state.suspend.message;
-		var code = state.suspend.code;
-		log.info('[%s] Rejecting incoming connection from %s. Server suspended with message: "%d %s"',
-			session.id, session.client.info, code, message);
-		var reply = new Error(state.suspend.message);
-		reply.responseCode = this.suspend.code;
-		state.master.destroySession();
-		delete state.sessions[smtpinfo.id];
-		ready(reply);
-	}
 	session.smtpInfo = smtpinfo;
 	session.smtpCallback = ready;
 	log.info('[%s] Connect from client %s.', session.id, client.info);
