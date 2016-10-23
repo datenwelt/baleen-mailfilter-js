@@ -243,7 +243,6 @@ Server.prototype.onClose = function (smtpinfo) {
 	var session = state.master.getSession(sessionId);
 	if (!session) {
 		log.debug('Unable to close unknown session: %s', sessionId);
-		ready(smtpError().log());
 		return;
 	}
 	state.master.destroySession(session.id);
@@ -268,18 +267,24 @@ Server.prototype.relay = function (id) {
 			reject("Relaying failed due to local errors.");
 			return;
 		}
+		var scheme = uri.scheme() || "smtp";
+		if ( scheme != 'smtp' && scheme !='smtps' ) {
+			log.error('[%s] Unable to relay message, invalid URI for outgoing SMTP server: Scheme part must be either "smtp:" or "smpts:".');
+			reject("Relaying failed due to local errors.");
+			return;
+		}
 		var server = uri.hostname();
-		var port = uri.port() || 25;
+		var port = uri.port() || ( scheme == 'smtp' ? 25 : 465);
+		var secure = scheme == 'smtps';
 		var username = uri.username();
 		var password = uri.password();
 		var connection = new SMTPConnection({
 			host: server,
 			port: port,
+			secure: secure,
 			opportunisticTls: true,
-			authMethod: 'CRAM-MD5',
-			tls : { rejectUnauthorized: false },
-			debug: true,
-			logger: log
+			authMethod: 'PLAIN',
+			tls : { rejectUnauthorized: false }
 		});
 		connection.on('error', function(error) {
 			log.error('[%s] Unable to relay message. Error during SMTP connection: %s', id, error);
@@ -295,18 +300,24 @@ Server.prototype.relay = function (id) {
 				envelope.size = session.content.length;
 				connection.send(envelope, session.content, function(err, info) {
 					if ( err ) {
-						var smtpMsg = strfmt('%d %s', err.responseCode, err.response);
-						log.error('[%s] Unable to relay message. Remote server said: %s', id, smtpMsg);
-						log.debug(err);
-						reject(err);
+						log.error('[%s] Unable to relay message. Remote server said: %s', id, err.response);
+						log.debug(err.response);
+						var matches = /^((\d{3})\s+)/.exec(err.response);
+						if ( matches ) {
+							var responseCode = new Number(matches[1]);
+							var responseMessage = err.response.substr(matches[2].length);
+							reject(smtpError(responseCode, responseMessage));
+						} else {
+							reject();
+						}
 					} else {
-						log.info('[%s] Relayed to %s:%d: %s', id, server, port, info.response);
-						if ( info.rejected && info.rejected.length ) {
+						if ( info.rejected ) {
 							_.each(info.rejected, function(addr, idx) {
-								var msg = strfmt('[%s] rcpt=%s, rejected=%s', id, addr, info.rejectedErrors[idx]);
-								log.info(msg);
+								var msg = strfmt('[%s] Relaying failed for rcpt=%s, reason=%s', id, addr, info.rejectedErrors[idx]);
+								log.warn(msg);
 							});
 						}
+						log.info('[%s] Relayed to [%s:%d]: %s', id, server, port, info.response);
 						resolve();
 					}
 					connection.quit();

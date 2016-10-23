@@ -377,11 +377,12 @@ Master.prototype.processDeliver = function(channel, msg) {
 	}
 	if ( _.last(EXCHANGES) == exchange ) {
 		state.smtpd.relay(session.id).then(function() {
-			log.info("[%s] Successfully delivered message.", session.id);
+			log.info("[%s] End of session.", session.id);
 			session.smtpCallback();
 		}).catch(function(error) {
-			log.info("[%s] Delivery of message failed.", session.id);
-			session.smtpCallback(smtpError().log());
+			error = error instanceof Error ? error : smtpError();
+			log.info("[%s] End of session.", session.id);
+			session.smtpCallback(error.log());
 		});
 	} else {
 		log.debug('[%s] Delivering message to next processing stage from %s.', session.id, queueName);
