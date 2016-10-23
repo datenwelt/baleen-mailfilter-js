@@ -31,6 +31,9 @@ function Master() {
 
 Master.prototype.start = function () {
 	var state = this;
+	process.on('SIGTERM', function() {
+		state.shutdown('Received SIGTERM.');
+	});
 	log.info('Starting baleen mail filter master process.');
 	return state.init()
 	.then(function () {
@@ -45,6 +48,11 @@ Master.prototype.start = function () {
 
 Master.prototype.init = function () {
 	return Promise.when([this.initMQ(), this.initSmtpServer()]);
+};
+
+Master.prototype.initSmtpServer = function () {
+	this.smtpd = new SMTPServer(this);
+	return this.smtpd.init();
 };
 
 Master.prototype.initMQ = function () {
@@ -101,13 +109,49 @@ Master.prototype.initMQ = function () {
 };
 
 Master.prototype.shutdown = function (reason) {
+	var state = this;
+	var exitCode = 0;
 	if (reason instanceof Error) {
-		log.info('Shutting down master process due to error: %s', reason);
+		log.info('Shutting down master process. Error: %s', reason);
 		log.debug(reason);
 	} else {
 		log.info('Shutting down master process. Reason: %s', reason);
+		exitCode = 1;
 	}
-	process.exit(1);
+	var shutdowns = {};
+	var shutdownCallback = function(name) {
+		delete shutdowns[name];
+		if ( _.size(shutdowns) == 0 ) {
+			log.info("Shutdown of master process complete.");
+			process.exit(exitCode);
+		}
+	};
+	_.chain(state.consumers).keys().each(function(name) {
+		var consumer = state.consumers[name];
+		name = "consumer-"+name;
+		if ( consumer && consumer.channel && consumer.consumerTag ) {
+			shutdowns[name] = 1;
+			consumer.channel.cancel(consumer.consumerTag).then(function() {
+				shutdownCallback(name);
+			}).catch(function() {
+				shutdownCallback(name);
+			})
+		}
+	});
+	if ( state.mq.channel.channel ) {
+		shutdowns['master'] = 1;
+		state.mq.channel.channel.close().then(function() {
+			shutdownCallback('master');
+		}).catch(function() {
+			shutdownCallback('master');
+		});
+	}
+	if ( state.smtpd.server ) {
+		shutdowns['smtpd'] = 1;
+		state.mq.channel.channel.close(function() {
+			shutdownCallback('smtpd');
+		});
+	}
 };
 
 Master.prototype.createSession = function () {
@@ -178,6 +222,10 @@ Master.prototype.checkSender = function (id, smtpCallback) {
 
 Master.prototype.checkRecipient = function (id, smtpCallback) {
 	this._injectSessionForCheck(id, "CHECK_RECIPIENT", smtpCallback);
+};
+
+Master.prototype.checkMessage = function(id, smtpCallback) {
+	this._injectSessionForCheck(id, "CHECK_MESSAGE", smtpCallback);
 };
 
 Master.prototype.startConsumer = function (queue, processFn) {
@@ -328,7 +376,7 @@ Master.prototype.processDeliver = function(channel, msg) {
 		return;
 	}
 	if ( _.last(EXCHANGES) == exchange ) {
-		log.info("[%s] Delivering message downstream.");
+		log.info("[%s] Delivering message downstream.", session.id);
 	} else {
 		log.debug('[%s] Delivering message to next processing stage from %s.', session.id, queueName);
 	}
@@ -363,11 +411,6 @@ Master.prototype.processDeadLetter = function (channel, msg) {
 	state.destroySession(session.id);
 };
 
-
-Master.prototype.initSmtpServer = function () {
-	this.smtpd = new SMTPServer(this);
-	return this.smtpd.init();
-};
 
 Master.prototype.run = function () {
 	var processes = [];

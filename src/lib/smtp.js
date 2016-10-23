@@ -1,5 +1,6 @@
-var crypto = require('crypto');
+var Buffer = require('buffer');
 var bunyan = require('bunyan');
+var crypto = require('crypto');
 var SMTPServer = require('smtp-server').SMTPServer;
 var strfmt = require('util').format;
 var _ = require('underscore');
@@ -7,7 +8,7 @@ var _ = require('underscore');
 module.exports.Server = Server;
 module.exports.smtpError = smtpError;
 
-var log = bunyan.createLogger({name: 'baleen.rabbitmq'});
+var log = bunyan.createLogger({name: 'baleen.smtp'});
 log.level(process.env.BALEEN_DEBUG ? 'DEBUG' : 'INFO');
 
 Server.prototype.constructor = Server;
@@ -43,7 +44,8 @@ Server.prototype.start = function () {
 		onConnect: _.bind(state.onConnect, state),
 		onMailFrom: _.bind(state.onMailFrom, state),
 		onRcptTo: _.bind(state.onRcptTo, state),
-		//onData: _.bind(onData, state)
+		onData: _.bind(state.onData, state),
+		onClose: _.bind(state.onClose, state)
 	};
 	return new Promise(function (resolve, reject) {
 		state.smtpd = {};
@@ -116,7 +118,6 @@ Server.prototype._cleanup = function () {
 		}
 		delete state.smtpd;
 	}
-
 };
 
 Server.prototype.onError = function (error) {
@@ -185,13 +186,13 @@ Server.prototype.onConnect = function (smtpinfo, ready) {
 Server.prototype.onMailFrom = function (address, smtpinfo, ready) {
 	var state = this;
 	var sessionId = state.sessions[smtpinfo.id];
-	if ( !sessionId ) {
+	if (!sessionId) {
 		log.debug('Skipping unknown smtp session id: %s', smtpinfo.id);
 		ready(smtpError().log());
 		return;
 	}
 	var session = state.master.getSession(sessionId);
-	if ( !session ) {
+	if (!session) {
 		log.debug('Skipping unknown session: %s', sessionId);
 		ready(smtpError().log());
 		return;
@@ -213,13 +214,13 @@ Server.prototype.onMailFrom = function (address, smtpinfo, ready) {
 Server.prototype.onRcptTo = function (address, smtpinfo, ready) {
 	var state = this;
 	var sessionId = state.sessions[smtpinfo.id];
-	if ( !sessionId ) {
+	if (!sessionId) {
 		log.debug('Skipping unknown smtp session id: %s', smtpinfo.id);
 		ready(smtpError().log());
 		return;
 	}
 	var session = state.master.getSession(sessionId);
-	if ( !session ) {
+	if (!session) {
 		log.debug('Skipping unknown session: %s', sessionId);
 		ready(smtpError().log());
 		return;
@@ -238,6 +239,70 @@ Server.prototype.onRcptTo = function (address, smtpinfo, ready) {
 		state.master.destroySession(session.id);
 		ready(smtpError());
 	}
+};
+
+Server.prototype.onData = function (stream, smtpinfo, ready) {
+	var state = this;
+	var sessionId = state.sessions[smtpinfo.id];
+	if (!sessionId) {
+		log.debug('Skipping unknown smtp session id: %s', smtpinfo.id);
+		ready(smtpError().log());
+		return;
+	}
+	var session = state.master.getSession(sessionId);
+	if (!session) {
+		log.debug('Skipping unknown session: %s', sessionId);
+		ready(smtpError().log());
+		return;
+	}
+	var buffers = [];
+	var bufferTotal = 0;
+	stream.on('close', function() {
+		log.debug('[%s] Content stream was closed unexpectedly.', session.id);
+		stream.removeAllListeners();
+		ready(smtpError().log());
+	});
+	stream.on('error', function(error) {
+		log.debug('[%s] Error in content stream: %s', session.id, error);
+		stream.removeAllListeners();
+		ready(smtpError().log());
+	});
+	stream.on('end', function() {
+		log.info('[%s] Received %d bytes of message data.', session.id, bufferTotal);
+		var content = Buffer.alloc(bufferTotal);
+		var pos = 0;
+		_.each(buffers, function(buffer) {
+			buffer.copy(content, pos);
+			pos += buffer.length;
+		});
+		session.content = content.toString('utf8');
+		state.master.checkMessage(session.id, ready);
+	});
+	stream.on('data', function(buffer) {
+		buffers.push(buffer);
+		bufferTotal += buffer.length;
+	});
+	delete session.recipient;
+	session.smtpInfo = smtpinfo;
+	session.smtpCallback = ready;
+};
+
+Server.prototype.onClose = function(smtpinfo) {
+	var state = this;
+	var sessionId = state.sessions[smtpinfo.id];
+	if (!sessionId) {
+		log.debug('Skipping unknown smtp session id: %s', smtpinfo.id);
+		ready(smtpError().log());
+		return;
+	}
+	var session = state.master.getSession(sessionId);
+	if (!session) {
+		log.debug('Skipping unknown session: %s', sessionId);
+		ready(smtpError().log());
+		return;
+	}
+	state.master.destroySession(session.id);
+	log.info('[%s] Client connection closed.', session.id);
 };
 
 function smtpError() {
