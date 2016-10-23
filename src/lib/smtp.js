@@ -55,16 +55,16 @@ Server.prototype.start = function () {
 			log.debug('Unable to start smtp server at %s: %s', state.address, error);
 			reject(error);
 		};
-		state.smtpd.onClose = _.bind(state.onClose, state);
+		state.smtpd.onServerClose = _.bind(state.onServerClose, state);
 		state.smtpd.server.on('close', state.smtpd.onClose);
-		state.smtpd.onError = _.bind(state.onError, state);
+		state.smtpd.onServerError = _.bind(state.onServerError, state);
 		state.smtpd.server.on('error', _.bind(errBack, state));
 
 		try {
 			state.smtpd.server.listen(state.port, state.host, function () {
 				log.debug('Smtp server listening at %s', state.address);
 				state.smtpd.server.removeListener('on', errBack);
-				state.smtpd.server.on('error', state.smtpd.onError);
+				state.smtpd.server.on('error', state.smtpd.onServerError);
 				resolve(state);
 			});
 		} catch (error) {
@@ -77,12 +77,12 @@ Server.prototype.start = function () {
 	});
 };
 
-Server.prototype.onError = function (error) {
+Server.prototype.onServerError = function (error) {
 	log.debug('Closing smtp server on error: %s', error);
 	this.master.shutdown();
 };
 
-Server.prototype.onClose = function () {
+Server.prototype.onServerClose = function () {
 	log.debug('Smtp server at %s closed.', state.address);
 	this.smtpd.server.removeListener('close', this.smtpd.onClose);
 	this.smtpd.server.removeListener('error', this.smtpd.onError);
@@ -143,6 +143,9 @@ Server.prototype.onMailFrom = function (address, smtpinfo, ready) {
 		return;
 	}
 	session.sender = address.address;
+	delete session.recipient;
+	delete session.recipients;
+	delete session.content;
 	session.smtpInfo = smtpinfo;
 	session.smtpCallback = ready;
 	log.info('[%s] from=%s args=%j', session.id, session.sender, address.args);
@@ -304,7 +307,7 @@ Server.prototype.relay = function (id) {
 						log.debug(err.response);
 						var matches = /^((\d{3})\s+)/.exec(err.response);
 						if ( matches ) {
-							var responseCode = new Number(matches[1]);
+							var responseCode = Number.parseInt(matches[1]);
 							var responseMessage = err.response.substr(matches[2].length);
 							reject(smtpError(responseCode, responseMessage));
 						} else {

@@ -385,7 +385,7 @@ Master.prototype.processDeliver = function(channel, msg) {
 			session.smtpCallback(error.log());
 		});
 	} else {
-		log.debug('[%s] Delivering message to next processing stage from %s.', session.id, queueName);
+		log.debug('[%s] Delivering message to next processing stage from %s.', session.id, exchange);
 		session.smtpCallback();
 	}
 };
