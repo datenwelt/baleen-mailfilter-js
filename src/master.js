@@ -7,8 +7,8 @@ var _ = require('underscore');
 
 var BaleenReject = require('./master/reject.js');
 var ConfirmChannel = require('./lib/rabbitmq.js').ConfirmChannel;
-var SMTPServer = require('./lib/smtp.js').Server;
-var smtpError = require('./lib/smtp.js').smtpError;
+var SMTPServer = require('./lib/smtp/server.js').Server;
+var smtpError = require('./lib/smtp/server.js').smtpError;
 
 var EXCHANGES = ['CHECK_CLIENT', 'CHECK_SENDER', 'CHECK_RECIPIENT', 'CHECK_MESSAGE'];
 var INCOMING_QUEUE = process.env.BALEEN_INCOMING_QUEUE || 'INCOMING';
