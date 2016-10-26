@@ -120,6 +120,7 @@ describe("SMTP Client", function () {
 				});
 				client.on('greeting', function (greeting) {
 					done();
+					server.close();
 				});
 				client.connect().catch(function (error) {
 					done(error);

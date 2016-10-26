@@ -21,7 +21,8 @@ function SMTPClient() {
 		logger: false,
 		debug: false,
 		connectTimeout: 15000,
-		socketTimeout: 5000
+		socketTimeout: 5000,
+		startTls: true
 	};
 	var uri = "smtp://localhost";
 	_.each(arguments, function (arg) {
@@ -62,7 +63,7 @@ function SMTPClient() {
 	this.recvBuffersLength = 0;
 	this.recvLines = [];
 	this.lastCommand = false;
-
+	this.startTls = options.startTls;
 }
 
 SMTPClient.prototype.connect = function () {
@@ -120,27 +121,113 @@ SMTPClient.prototype.close = function (reason) {
 	this.socket.end();
 };
 
+SMTPClient.prototype.processReply = function (reply) {
+	var state = this;
+	var error;
+	process.nextTick(function () {
+		if (reply.code == 500) {
+			error = new Error(strfmt('Server indicates that our %s command exceeded size limit: %d %s', state.phase, reply.code, reply.message));
+			error.reply = reply;
+			this.close(error);
+			return;
+		}
+		if (reply.code == 501) {
+			error = new Error(strfmt('Server indicates a syntax error in our %s command: %d %s', state.phase, reply.code, reply.message));
+			error.reply = reply;
+			this.close(error);
+			return;
+		}
+		if (reply.code == 421) {
+			error = new Error(strfmt('Server indicates a temporary failure on their side: %d %s', reply.code, reply.message));
+			error.reply = reply;
+			this.close(error);
+			return;
+		}
+		switch (state.phase) {
+			case 'GREETING':
+				if (state.processGreeting(reply)) return;
+			case 'EHLO':
+				if (state.processEhloReply(reply)) return;
+			default:
+				error = new Error(strfmt('Unexpected STMP conversation phase: %s', state.phase));
+				error.reply = reply;
+				this.quit(error);
+				return;
+		}
+		error = new Error(strfmt('Received unexpected reply from server after %s: %d %s', state.phase, reply.code, reply.message));
+		error.reply = reply;
+		this.quit(error);
+	});
+};
+
 SMTPClient.prototype.processGreeting = function (reply) {
 	var state = this;
-	if (reply.code >= 200 && reply.code < 300) {
-		if (reply.code != 220) {
-			if (state.logger)
-				state.logger.warn('[%s] Invalid reply code in server greeting indicates success: %d', this, reply.code);
-		}
-		var remoteName = _.first(reply.message.split(" "))
-		state.session.greeting = {
-			name: remoteName,
-			reply: reply
-		};
-		state.emit('greeting', remoteName, reply);
-		process.nextTick(function () {
-			state.ehlo();
-		});
-		return;
+	switch (reply.code) {
+		case 220:
+			var remoteName = _.first(reply.message.split(" "));
+			state.session.greeting = {
+				domain: remoteName,
+				reply: reply
+			};
+			state.emit('greeting', remoteName, reply);
+			process.nextTick(function () {
+				state.ehlo();
+			});
+			return true;
+		case 554:
+			this.close(state.createSmtpError(reply));
+			return true;
 	}
-	var error = new Error(strfmt('Remote server problem: %d %s', reply.code, reply.message));
-	error.smtpReply = reply;
-	state.close(error);
+	return false;
+};
+
+SMTPClient.prototype.processEhloReply = function (reply) {
+	var state = this;
+	var error;
+	switch (reply.code) {
+		case 250:
+			var matches = /(\S+) (.+)/.exec(reply.lines[0]);
+			if (!matches) {
+				this.close(new Error(strfmt('[%s] Received ill formatted response from server: %d %s', reply.replyCode, reply.lines[0])));
+				return true;
+			}
+			state.session.ehlo = {
+				domain: matches[1],
+				greet: matches[2],
+				reply: reply
+			};
+			state.session.ehlo.capabilities = {};
+			_.chain(reply.lines).rest(1).each(function (line) {
+				var matches = /(\w+)(?: (.+))?/.exec(line);
+				if (matches)
+					state.session.ehlo.capabilities[matches[1]] = matches[2] || true;
+			});
+			var ehlo = state.session.ehlo;
+			state.emit('ehlo', ehlo.domain, ehlo.greet, ehlo.capabilities, reply);
+			process.nextTick(function () {
+				if ( state.scheme == 'smtp' && state.session.ehlo.capabilities['STARTTLS'] && state.startTls ) {
+					state.startTls();
+					return;
+				}
+				if ( state.scheme == 'smtp' && !state.session.ehlo.capabilities['STARTTLS'] && state.startTls === 'required' ) {
+					state.close(new Error('STARTTLS required but not supported by server.'));
+					return;
+				}
+			});
+			return true;
+		case 504:
+		case 550:
+		case 502:
+			this.close(state.createSmtpError(reply));
+			return true;
+	}
+	return false;
+};
+
+SMTPClient.prototype.quit = function (reason) {
+	this.phase = 'QUIT';
+	this.command('QUIT');
+	this.close(reason);
 };
 
 SMTPClient.prototype.helo = function (name) {
@@ -151,6 +238,11 @@ SMTPClient.prototype.helo = function (name) {
 SMTPClient.prototype.ehlo = function (name) {
 	this.phase = 'EHLO';
 	return this.command(strfmt('EHLO %s', name || this.name));
+};
+
+SMTPClient.prototype.startTls = function() {
+	this.phase = 'STARTTLS';
+	return this.command(strfmt('STARTTLS'));
 };
 
 SMTPClient.prototype.command = function (command) {
@@ -180,20 +272,6 @@ SMTPClient.prototype.command = function (command) {
 	} else {
 		callback(command);
 	}
-};
-
-SMTPClient.prototype.processReply = function (reply) {
-	var state = this;
-	process.nextTick(function () {
-		switch (state.phase) {
-			case 'GREETING':
-				state.processGreeting(reply);
-				break;
-			case 'EHLO':
-				state.processEhlo(reply);
-				break;
-		}
-	});
 };
 
 SMTPClient.prototype.onClose = function () {
@@ -317,6 +395,12 @@ SMTPClient.prototype.debug = function () {
 	}
 	this.logger.debug.apply(this.logger, arguments);
 	return this;
+};
+
+SMTPClient.prototype.createSmtpError = function(reply) {
+	var error = new Error(strfmt('%d %s', reply.code, reply.message));
+	error.reply = reply;
+	return error;
 };
 
 SMTPClient.prototype.toString = function () {
