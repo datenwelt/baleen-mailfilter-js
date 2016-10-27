@@ -1,6 +1,7 @@
 var SMTPServer = require('smtp-server').SMTPServer;
 var Client = require('../../../src/lib/smtp/client');
 var expect = require("chai").expect;
+var os = require('os');
 var strfmt = require('util').format;
 var _ = require('underscore');
 
@@ -106,7 +107,7 @@ describe("SMTP Client", function () {
 			var server = new SMTPServer({secure: true});
 			server.listen(serverPort, "localhost", function (args) {
 				var uri = strfmt('smtps://localhost:%d', serverPort);
-				var client = new Client(uri, { tls: {rejectUnauthorized: false }});
+				var client = new Client(uri, {tls: {rejectUnauthorized: false}});
 				client.connect().then(function () {
 					expect(client.phase).to.be.equal('GREETING');
 					expect(client.session).to.exist;
@@ -129,7 +130,7 @@ describe("SMTP Client", function () {
 			var server = new SMTPServer({secure: true});
 			server.listen(serverPort, "localhost", function (args) {
 				var uri = strfmt('smtps://localhost:%d', serverPort);
-				var client = new Client(uri, { tls: {rejectUnauthorized: true }});
+				var client = new Client(uri, {tls: {rejectUnauthorized: true}});
 				client.connect().then(function () {
 					server.close();
 					done(new Error("Promise should not resolve."));
@@ -140,13 +141,13 @@ describe("SMTP Client", function () {
 			});
 		});
 
-		it.only("client closes connection with error if server does not offer neither SMTPS nor STARTTLS and STARTTLS is required.", function (done) {
+		it("client closes connection with error if server does not offer neither SMTPS nor STARTTLS and STARTTLS is required.", function (done) {
 			var serverPort = Math.floor(Math.random() * 20000) + 20000;
 			var server = new SMTPServer({secure: false, hideSTARTTLS: true});
 			server.listen(serverPort, "localhost", function (args) {
 				var uri = strfmt('smtp://localhost:%d', serverPort);
-				var client = new Client(uri, { tls: {rejectUnauthorized: false}, startTls: 'required' });
-				client.on('error', function(error) {
+				var client = new Client(uri, {tls: {rejectUnauthorized: false}, startTls: 'required'});
+				client.on('error', function (error) {
 					expect(error).to.exist;
 					expect(error.message).to.be.equal('STARTTLS required but not supported by server.');
 					client.close();
@@ -167,14 +168,14 @@ describe("SMTP Client", function () {
 			var server = new SMTPServer({secure: true});
 			server.listen(serverPort, "localhost", function (args) {
 				var uri = strfmt('smtps://localhost:%d', serverPort);
-				var client = new Client(uri, { tls: {rejectUnauthorized: false }});
-				client.on('ehlo', function(reply, callback) {
+				var client = new Client(uri, {tls: {rejectUnauthorized: false}});
+				client.on('ehlo', function (reply, callback) {
 					callback(_.bind(client.close, client));
 				});
-				client.on('close', function() {
+				client.on('close', function () {
 					done();
 				});
-				client.on('error', function(error) {
+				client.on('error', function (error) {
 					done(error);
 					server.close();
 				});
@@ -217,14 +218,62 @@ describe("SMTP Client", function () {
 				done(error);
 			});
 			client.on('greeting', function (reply, callback) {
-				callback(_.bind(client.close, client));
-				done();
+				try {
+					expect(reply).to.exist;
+					expect(reply.code).to.be.equal(220);
+					expect(client.session.greeting).to.exist;
+					expect(client.session.greeting.domain).to.be.equal(os.hostname());
+					callback(_.bind(client.close, client));
+					done();
+				} catch (err) {
+					done(err);
+				}
+				client.close();
 			});
 			client.connect().catch(function (error) {
 				done(error);
 			});
 		});
 
+	});
+
+	describe('Command EHLO', function () {
+		var serverPort;
+		var server;
+
+		beforeEach("Starting the test SMTP server.", function (done) {
+			serverPort = Math.floor(Math.random() * 20000) + 20000;
+			server = new SMTPServer({
+				useXForward: true
+			});
+			server.listen(serverPort, "localhost", function (args) {
+				done();
+			});
+		});
+
+		afterEach("Stopping the test SMTP server.", function (done) {
+			if (server) {
+				server.close(function () {
+					done();
+				});
+				server = undefined;
+			}
+		});
+
+		it("EHLO is sent by default and event is triggered.", function(done) {
+			var uri = strfmt('smtp://localhost:%d', serverPort);
+			var client = new Client(uri);
+			client.on('ehlo', function (reply, callback) {
+				callback('QUIT');
+				done();
+			});
+			client.on('error', function (error) {
+				done(error);
+			});
+			client.connect().catch(function(error) {
+				done(error);
+			});
+		});
 	});
 
 });
