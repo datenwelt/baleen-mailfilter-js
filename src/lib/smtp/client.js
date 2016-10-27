@@ -3,14 +3,13 @@ var events = require('events');
 var net = require('net');
 var os = require('os');
 var strfmt = require('util').format;
+var tls = require('tls');
 var URI = require('urijs');
 
 module.exports = SMTPClient;
 
 SMTPClient.prototype = Object.create(events.EventEmitter.prototype);
 SMTPClient.prototype.constructor = SMTPClient;
-
-var LAST_ID = 1;
 
 var SEND = 1;
 var RECV = 2;
@@ -22,7 +21,8 @@ function SMTPClient() {
 		debug: false,
 		connectTimeout: 15000,
 		socketTimeout: 5000,
-		startTls: true
+		startTls: true,
+		tls: {}
 	};
 	var uri = "smtp://localhost";
 	_.each(arguments, function (arg) {
@@ -63,48 +63,70 @@ function SMTPClient() {
 	this.recvBuffersLength = 0;
 	this.recvLines = [];
 	this.lastCommand = false;
+	this.tls = options.tls;
 	this.startTls = options.startTls;
 }
 
 SMTPClient.prototype.connect = function () {
-	var state = this;
-	state.phase = "CONNECTING";
-	return new Promise(function (resolve, reject) {
-		if (!state.phase) {
+	this.phase = "CONNECTING";
+	return new Promise(_.bind(function (resolve, reject) {
+		if (!this.phase) {
 			reject(Error('Client has already tried to connect. Use a new client instead.'));
 			return;
 		}
 		var onConnectTimeout = setTimeout(function () {
-			var error = new Error(strfmt('Connection timeout.', this));
-			error.smtpClient = state;
-			reject(error);
-		}, state.connectTimeout);
+			reject(new Error(strfmt('Connection timeout.')));
+		}, this.connectTimeout);
 
 		var onConnectError = function (error) {
-			state.phase = 'ERROR';
+			clearTimeout(onConnectTimeout);
+			this.phase = 'ERROR';
 			reject(error);
 		};
 
-		state.socket = net.createConnection({
-			host: state.host,
-			port: state.port,
-			timeout: state.socketTimeout
-		}, function () {
-			state.phase = 'GREETING';
-			state.direction = RECV;
-			clearTimeout(onConnectTimeout);
-			state.socket.removeListener('error', onConnectError);
-			state.socket.on('error', _.bind(state.onError, state));
-			state.socket.on('connect', _.bind(state.onConnect, state));
-			state.socket.on('timeout', _.bind(state.onTimeout, state));
-			state.socket.on('close', _.bind(state.onClose, state));
-			state.socket.on('end', _.bind(state.onEnd, state));
-			state.socket.on('data', _.bind(state.onData, state));
-			resolve(state);
+		this.socket = net.createConnection({
+			host: this.host,
+			port: this.port,
+			timeout: this.socketTimeout
+		}, _.bind(function () {
+			if (this.scheme === 'smtps') {
+				this._upgradeConnection().then(_.bind(function () {
+					this.security.type = "SMTPS";
+					this.processConnect();
+					resolve();
+				}, this)).catch(_.bind(function (error) {
+					clearTimeout(onConnectTimeout);
+					this.phase = 'ERROR';
+					reject(error);
+				}, this));
+			} else {
+				clearTimeout(onConnectTimeout);
+				this.processConnect();
+				resolve();
+			}
+		}, this));
+		this.socket.on('error', onConnectError);
+	}, this));
+};
+
+SMTPClient.prototype._upgradeConnection = function () {
+	var _doUpgrade = function (resolve, reject) {
+		if (this.security) {
+			return resolve(this.socket);
+		}
+		this.security = {};
+		var options = Object.assign({}, this.tls);
+		options.socket = this.socket;
+		this.socket = tls.connect(options, _.bind(function () {
+			this.security.cipher = this.socket.getCipher();
+			this.security.protocol = this.socket.getProtocol();
+			resolve();
+		}, this));
+		this.socket.on('error', function (error) {
+			reject(error);
 		});
-		state.socket.on('error', onConnectError);
-		state.socket.on('connect', _.bind(state.onConnect, state));
-	});
+	};
+	return new Promise(_.bind(_doUpgrade, this));
 };
 
 SMTPClient.prototype.close = function (reason) {
@@ -128,57 +150,49 @@ SMTPClient.prototype.processReply = function (reply) {
 		if (reply.code == 500) {
 			error = new Error(strfmt('Server indicates that our %s command exceeded size limit: %d %s', state.phase, reply.code, reply.message));
 			error.reply = reply;
-			this.close(error);
-			return;
+			return this.close(error);
+
 		}
 		if (reply.code == 501) {
 			error = new Error(strfmt('Server indicates a syntax error in our %s command: %d %s', state.phase, reply.code, reply.message));
 			error.reply = reply;
-			this.close(error);
-			return;
+			return this.close(error);
 		}
 		if (reply.code == 421) {
 			error = new Error(strfmt('Server indicates a temporary failure on their side: %d %s', reply.code, reply.message));
 			error.reply = reply;
-			this.close(error);
-			return;
+			return this.close(error);
 		}
-		switch (state.phase) {
-			case 'GREETING':
-				if (state.processGreeting(reply)) return;
-			case 'EHLO':
-				if (state.processEhloReply(reply)) return;
-			default:
-				error = new Error(strfmt('Unexpected STMP conversation phase: %s', state.phase));
-				error.reply = reply;
-				this.quit(error);
-				return;
+		try {
+			switch (state.phase) {
+				case 'GREETING':
+					return state.processGreeting(reply);
+				case 'EHLO':
+					return state.processEhloReply(reply);
+				default:
+					throw (new Error(strfmt('Unexpected STMP conversation phase: %s', state.phase)));
+			}
+		} catch (error) {
+			error.reply = error.reply || reply;
+			this.quit(error);
 		}
-		error = new Error(strfmt('Received unexpected reply from server after %s: %d %s', state.phase, reply.code, reply.message));
-		error.reply = reply;
-		this.quit(error);
 	});
 };
 
 SMTPClient.prototype.processGreeting = function (reply) {
-	var state = this;
 	switch (reply.code) {
 		case 220:
 			var remoteName = _.first(reply.message.split(" "));
-			state.session.greeting = {
+			this.session.greeting = {
 				domain: remoteName,
 				reply: reply
 			};
-			state.emit('greeting', remoteName, reply);
-			process.nextTick(function () {
-				state.ehlo();
-			});
-			return true;
+			return this._emitReply('greeting', reply, _.bind(this.ehlo, this));
 		case 554:
-			this.close(state.createSmtpError(reply));
-			return true;
+			return this.close(state.createSmtpError(reply));
 	}
-	return false;
+	throw new Error(strfmt('Received unexpected reply from server after %s: %d %s', this.phase, reply.code, reply.message));
+	;
 };
 
 SMTPClient.prototype.processEhloReply = function (reply) {
@@ -202,18 +216,14 @@ SMTPClient.prototype.processEhloReply = function (reply) {
 				if (matches)
 					state.session.ehlo.capabilities[matches[1]] = matches[2] || true;
 			});
-			var ehlo = state.session.ehlo;
-			state.emit('ehlo', ehlo.domain, ehlo.greet, ehlo.capabilities, reply);
-			process.nextTick(function () {
-				if ( state.scheme == 'smtp' && state.session.ehlo.capabilities['STARTTLS'] && state.startTls ) {
-					state.startTls();
-					return;
-				}
-				if ( state.scheme == 'smtp' && !state.session.ehlo.capabilities['STARTTLS'] && state.startTls === 'required' ) {
-					state.close(new Error('STARTTLS required but not supported by server.'));
-					return;
-				}
-			});
+			var nextAction = _.bind(state.quit, state, new Error('No further SMTP actions defined for this state.'));
+			if (!state.security && state.session.ehlo.capabilities['STARTTLS'] && state.startTls) {
+				nextAction = _.bind(state.startTls, state);
+			}
+			if (!state.security && !state.session.ehlo.capabilities['STARTTLS'] && state.startTls === 'required') {
+				nextAction = _.bind(state.close, state, new Error('STARTTLS required but not supported by server.'));
+			}
+			state._emitReply('ehlo', reply, nextAction);
 			return true;
 		case 504:
 		case 550:
@@ -240,7 +250,7 @@ SMTPClient.prototype.ehlo = function (name) {
 	return this.command(strfmt('EHLO %s', name || this.name));
 };
 
-SMTPClient.prototype.startTls = function() {
+SMTPClient.prototype.startTls = function () {
 	this.phase = 'STARTTLS';
 	return this.command(strfmt('STARTTLS'));
 };
@@ -276,13 +286,20 @@ SMTPClient.prototype.command = function (command) {
 
 SMTPClient.prototype.onClose = function () {
 	this.debug('[%s] Connection closed.', this);
-	this.emit('close');
 	this.phase = 'CLOSED';
 	this.socket.removeAllListeners();
 };
 
-SMTPClient.prototype.onConnect = function () {
+SMTPClient.prototype.processConnect = function () {
 	this.debug('[%s] Connection established.', this);
+	this.phase = 'GREETING';
+	this.direction = RECV;
+	this.socket.removeAllListeners('error');
+	this.socket.on('error', _.bind(this.onError, this));
+	this.socket.on('timeout', _.bind(this.onTimeout, this));
+	this.socket.on('close', _.bind(this.onClose, this));
+	this.socket.on('end', _.bind(this.onEnd, this));
+	this.socket.on('data', _.bind(this.onData, this));
 	this.session.connect = {
 		server: {
 			addr: this.socket.remoteAddress,
@@ -389,6 +406,12 @@ SMTPClient.prototype.onTimeout = function () {
 	this.debug('[%s] Timeout waiting on data from server.', this);
 };
 
+SMTPClient.prototype.createSmtpError = function (reply) {
+	var error = new Error(strfmt('%d %s', reply.code, reply.message));
+	error.reply = reply;
+	return error;
+};
+
 SMTPClient.prototype.debug = function () {
 	if (!this.logger || !this.debug) {
 		return;
@@ -397,11 +420,37 @@ SMTPClient.prototype.debug = function () {
 	return this;
 };
 
-SMTPClient.prototype.createSmtpError = function(reply) {
-	var error = new Error(strfmt('%d %s', reply.code, reply.message));
-	error.reply = reply;
-	return error;
+SMTPClient.prototype._emitReply = function (event, reply, defaultAction) {
+	var callback = _.bind(function (next) {
+		if (next instanceof Error) {
+			callback.action = _.bind(function () {
+				this.close(next);
+			}, this);
+		} else if (_.isString(next)) {
+			callback.action = _.bind(
+				function () {
+					this.command(next);
+				}, this);
+		} else if (_.isFunction(next)) {
+			callback.action = next;
+		}
+		callback.countDown--;
+		if (!callback.countDown && callback.action) {
+			process.nextTick(callback.action)
+		}
+	}, this);
+	callback.countDown = this.listenerCount(event);
+	callback.action = defaultAction;
+	defaultAction.$default = 1;
+	if (callback.countDown) {
+		this.emit(event, reply, callback);
+	} else {
+		callback.countDown = 1;
+		process.nextTick(callback);
+	}
+
 };
+
 
 SMTPClient.prototype.toString = function () {
 	return this.uri;
