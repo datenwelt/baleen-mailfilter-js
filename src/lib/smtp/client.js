@@ -2,6 +2,7 @@ var _ = require('underscore');
 var events = require('events');
 var net = require('net');
 var os = require('os');
+var stream = require('stream');
 var strfmt = require('util').format;
 var tls = require('tls');
 var URI = require('urijs');
@@ -64,7 +65,19 @@ function SMTPClient() {
 	this.recvLines = [];
 	this.lastCommand = false;
 	this.tls = options.tls;
-	this.useStartTls = options.startTls;
+	this.extensions = {
+		STARTTLS: {
+			required: this.scheme === 'smtp' && this.username,
+			prio: 0
+		}
+	};
+	if (this.username) {
+		this.extensions.AUTH = {
+			required: true,
+			prio: 1,
+			mechs: ['CRAM-MD5', 'LOGIN', 'PLAIN']
+		}
+	}
 }
 
 SMTPClient.prototype.connect = function () {
@@ -107,6 +120,39 @@ SMTPClient.prototype.connect = function () {
 		}, this));
 		this.socket.on('error', onConnectError);
 	}, this));
+};
+
+SMTPClient.prototype.enable = function (extension, options) {
+	options = options || {};
+	var prio = Number.parse(options.prio);
+	if (Number.isNaN(prio)) {
+		prio = _.chain(this.extensions)
+			.keys()
+			.reduce(function (memo, key) {
+				var prio = this.extensions[key].prio || 0;
+				return prio > memo ? prio : memo;
+			}, 0, this);
+	} else {
+		var offset = 1;
+		_.chain(this.extensions)
+			.sortBy(function (key) {
+				return this.extensions[key].prio;
+			}, this)
+			.each(function (ext) {
+				if (ext.prio > prio) {
+					ext.prio = prio + offset;
+					offset++;
+				}
+			}, this);
+	}
+	if (!extension) return;
+	var ext = {};
+	ext[extension] = required ? 'required' : 'optional';
+	this.extensions.push()
+};
+
+SMTPClient.prototype.disable = function (extension) {
+
 };
 
 SMTPClient.prototype._upgradeConnection = function () {
@@ -170,12 +216,17 @@ SMTPClient.prototype.processReply = function (reply) {
 			case 'QUIT':
 				return this.processQuitReply(reply);
 			default:
+				return this.processUnknownCommandReply(reply);
 				throw (new Error(strfmt('Unexpected STMP conversation phase: %s', this.phase)));
 		}
 	} catch (error) {
 		error.reply = error.reply || reply;
 		this.quit(error);
 	}
+};
+
+SMTPClient.prototype.processUnknownCommandReply = function (reply) {
+
 };
 
 SMTPClient.prototype.processGreeting = function (reply) {
@@ -239,22 +290,18 @@ SMTPClient.prototype.processQuitReply = function (reply) {
 };
 
 SMTPClient.prototype.quit = function () {
-	this.phase = 'QUIT';
 	this.command('QUIT');
 };
 
 SMTPClient.prototype.helo = function (name) {
-	this.phase = 'HELO';
 	return this.command(strfmt('HELO %s', name || this.name));
 };
 
 SMTPClient.prototype.ehlo = function (name) {
-	this.phase = 'EHLO';
 	return this.command(strfmt('EHLO %s', name || this.name));
 };
 
 SMTPClient.prototype.startTls = function () {
-	this.phase = 'STARTTLS';
 	return this.command(strfmt('STARTTLS'));
 };
 
@@ -264,21 +311,49 @@ SMTPClient.prototype.command = function (command) {
 		return;
 	}
 	command = command.trim();
-	var callback = _.bind(function (sendCommand) {
-		if (this.direction != SEND) return;
-		sendCommand = sendCommand.trim() + "\r\n";
-		this.direction = RECV;
-		this.lastCommand = sendCommand;
-		if (!this.socket.write(sendCommand)) {
-			this.socket.on('drain', _.bind(function () {
-				this.socket.write(this.lastCommand);
-				this.debug('[%s] C: %s', this, this.lastCommand.trim());
-			}, this));
-		} else {
-			this.debug('[%s] C: %s', this, sendCommand.trim());
+	this.lastCommand = command;
+	if (this.direction != SEND) {
+		this.close(new Error('Cannot send command while waiting on server response.'));
+		return;
+	}
+	var matches = /^(\S+).*/.exec(command);
+	if (!matches) {
+		this.close(new Error('Invalid syntax for SMTP command: %s', command));
+		return;
+	}
+	this.phase = matches[1];
+	command += "\r\n";
+	this.direction = RECV;
+	if (!this.socket.write(command)) {
+		this.socket.on('drain', _.bind(function () {
+			this.socket.write(command);
+			this.debug('[%s] C: %s', this, this.lastCommand.trim());
+		}, this));
+	} else {
+		this.debug('[%s] C: %s', this, this.lastCommand.trim());
+	}
+};
+
+SMTPClient.prototype._parseCommandLine = function (inputStream) {
+	var pos = 0;
+	var command = {};
+	var mode = 'VERB';
+	var tokenBegin = 0;
+	var _processToken = function (tokenEnd) {
+
+	};
+	while (pos < buffer.length) {
+		var tokenEnd = pos++;
+		var currentChar = buffer.readUInt8(currentPos);
+		if (currentChar == 0x20) {
+			continue;
 		}
-	}, this);
-	callback(command);
+		if (currentChar == 0x0d) {
+
+			return command;
+		}
+	}
+	return command;
 };
 
 SMTPClient.prototype.onClose = function () {
@@ -347,6 +422,12 @@ SMTPClient.prototype.onData = function (chunk) {
 		this.recvBuffers.push(chunk);
 		this.recvBuffersLength += chunk.length;
 	}
+};
+
+SMTPClient.prototype._assertCommandLineChar = function (char) {
+	if (char == 0x09 || char == 0x0a || char == 0x0d || (char >= 0x20 && char <= 0x7e))
+		return char;
+	this.close(new Error('Command line contains an invalid character: %d', char));
 };
 
 SMTPClient.prototype._assertReplyLineChar = function (char) {
@@ -455,11 +536,8 @@ SMTPClient.prototype._emitReply = function (event, reply, defaultAction) {
 		process.nextTick(callback);
 	}
 
-}
-;
-
+};
 
 SMTPClient.prototype.toString = function () {
 	return this.uri;
 };
-

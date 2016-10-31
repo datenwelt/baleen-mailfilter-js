@@ -264,8 +264,36 @@ describe("SMTP Client", function () {
 			var uri = strfmt('smtp://localhost:%d', serverPort);
 			var client = new Client(uri);
 			client.on('ehlo', function (reply, callback) {
+				expect(client.session.ehlo).to.exist;
+				expect(client.session.ehlo.domain).to.be.equal(os.hostname());
+
 				callback('QUIT');
 				done();
+			});
+			client.on('error', function (error) {
+				done(error);
+			});
+			client.connect().catch(function(error) {
+				done(error);
+			});
+		});
+
+		it("EHLO collects available SMTP extensions.", function(done) {
+			var uri = strfmt('smtp://localhost:%d', serverPort);
+			var client = new Client(uri);
+			client.on('ehlo', function (reply, callback) {
+				try {
+					expect(client.session.ehlo).to.exist;
+					expect(client.session.ehlo.capabilities).to.exist;
+					expect(client.session.ehlo.capabilities.XFORWARD).to.exist;
+					expect(client.session.ehlo.capabilities.STARTTLS).to.exist;
+					expect(client.session.ehlo.capabilities.AUTH).to.exist;
+					done();
+				} catch (error) {
+					done(error);
+				} finally {
+					callback('QUIT');
+				}
 			});
 			client.on('error', function (error) {
 				done(error);
