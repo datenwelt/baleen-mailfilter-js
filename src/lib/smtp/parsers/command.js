@@ -1,5 +1,6 @@
 var _ = require('underscore');
 var events = require('events');
+var strfmt = require('util').format;
 
 module.exports = SMTPCmdLineParser;
 
@@ -10,39 +11,53 @@ SMTPCmdLineParser.prototype.constructor = SMTPCmdLineParser;
  *
  * @constructor
  */
-function SMTPCmdLineParser(options) {
-	options = options || {};
-
-	this.utf8 = options.utf8 || false;
+function SMTPCmdLineParser() {
 
 	/**
-	 *
+	 * The collected chunks of data by the source stream. Data is collected from the stream
+	 * until there is a CRLF.
 	 * @type {Array}
 	 */
 	this.chunks = [];
 	/**
-	 *
+	 * The total size of all collected chunks so far.
 	 * @type {number}
 	 */
 	this.totalSize = 0;
+
 	/**
-	 *
+	 * The last character collected from the source stream to find CRLF occurences split between
+	 * two chunks.
+ 	 * @type {number}
+	 */
+	this.lastChar = 0x00;
+	/**
+	 * The source stream from "parse()".
 	 */
 	this.source = false;
 
 	/**
-	 *
+	 * The maximum line length for a command line in octets. By default 512 octets.
 	 * @type {number}
 	 */
 	this.maxLineLength = 512;
 
 	this._streamListeners = {};
 
+	/**
+	 * The last error from the stream or "false" if no such error occurred.
+	 * @type {boolean}
+	 */
 	this.error = false;
 }
 
+/**
+ * Parses command lines from the input stream and emits 'command' events whenever
+ * an SMTP command is detected.
+ *
+ * @param inputStream
+ */
 SMTPCmdLineParser.prototype.parse = function (inputStream) {
-	var pos = 0;
 	if (this.source) {
 		throw new Error('Already parsing another input stream.');
 	}
@@ -51,46 +66,70 @@ SMTPCmdLineParser.prototype.parse = function (inputStream) {
 	this._streamListeners.onEnd = _.bind(this.onError, this);
 
 	inputStream.on('data', this._streamListeners.onData);
-	inputStream.on('end', _this._streamListeners.onEnd);
+	inputStream.on('end', this._streamListeners.onEnd);
 	inputStream.on('error', this._streamListeners.onError);
 	this.source = inputStream;
 };
 
+/**
+ * Puts the parser in error state which prevents any further chunks of
+ * data to be read from the stream and emits an 'error' event.
+ *
+ * @param error
+ */
 SMTPCmdLineParser.prototype.enterErrorState = function (error) {
 	this.error = error;
 	this._cleanup();
 	this.emit('error', error);
 };
 
+/**
+ * Event handler for errors from the underlying input stream. Puts the parser into error mode when
+ * called.
+ *
+ * @param error
+ */
 SMTPCmdLineParser.prototype.onError = function (error) {
 	this.error = error;
+	this.emit('error', error);
 	this._cleanup();
 };
 
+/**
+ * Event handler for the 'end' event of the underlying stream.
+ */
 SMTPCmdLineParser.prototype.onEnd = function () {
 	this._cleanup();
+	this.emit('end');
 };
 
+/**
+ * Event handler for 'data' events of the underlying stream. Parses SMTP commands from the stream.
+ *
+ * @param chunk
+ */
 SMTPCmdLineParser.prototype.onData = function (chunk) {
 	var pos = 0;
 	if (this.error) return;
-	var previousChar = 0;
+	var previousChar = this.lastChar;
 	while (pos < chunk.length) {
 		if (this.totalSize + pos > this.maxLineLength) {
-			return this.enterErrorState(new Error('Command line length exceeds maximum of %d octets violating RFC 5321 section 4.5.3.1.4.', this.maxLineLength));
+			return this.enterErrorState(new Error(strfmt('Command line length exceeds maximum of %d octets violating RFC 5321 section 4.5.3.1.4.', this.maxLineLength)));
 		}
 		var currentChar = chunk.readUInt8(pos);
 		if (previousChar == 0x0d && currentChar != 0x0a) {
 			return this.enterErrorState(new Error('Command line contains a CR without LF violating RFC5321, section 2.3.8.'));
-		} else if (previousChar != 0x0d && currentChar != 0x0a) {
+		} else if (previousChar != 0x0d && currentChar == 0x0a) {
 			return this.enterErrorState(new Error('Command line contains a LF without preceding CR violating RFC5321 section 2.3.8.'));
 		} else if (previousChar != 0x0d && currentChar != 0x0a) {
 			pos++;
 			if (pos == chunk.length) {
-				this.totalSize = chunk.length;
+				this.totalSize += chunk.length;
+				this.lastChar = chunk.readUInt8(chunk.length-1);
 				this.chunks.push(chunk);
 				return;
 			}
+			previousChar = currentChar;
 			continue;
 		}
 		var line = Buffer.alloc(this.totalSize + pos);
@@ -103,6 +142,7 @@ SMTPCmdLineParser.prototype.onData = function (chunk) {
 		chunk = chunk.slice(pos + 1);
 		this.chunks = [];
 		this.totalSize = 0;
+		previousChar = 0;
 		try {
 			this.emit('command', this.parseCommandLine(line.toString('utf8')));
 		} catch (error) {
@@ -111,6 +151,20 @@ SMTPCmdLineParser.prototype.onData = function (chunk) {
 	}
 };
 
+/**
+ * Parses a string into an SMTP command structure. The structure has properties 'verb' and 'params' where 'verb' is
+ * the SMTP command itself and params is an array of key-value pairs (objects) for all passed command parameters.
+ * Command parameters have the form of KEYWORD=VALUE which are represented in Javascript as an object { KEY: 'VALUE' }.
+ * There is one object for each parameter.
+ *
+ * The commands EHLO, MAIL, RCPT have exactly one special argument each which is in the case of 'EHLO' the domain name of the client,
+ * the return path for 'MAIL' in the form of 'FROM:<...@...>' and the forward path in the form of "TO:<...@...>" for 'RCPT'.
+ *
+ * These arguments are stored in the properties 'domain', 'returnPath', 'forwardPath' for each of these commands respectively.
+ *
+ * @param line the command line as a string.
+ * @returns {{verb: *}} the command structure as described above.
+ */
 SMTPCmdLineParser.prototype.parseCommandLine = function (line) {
 	var verb, params;
 	if (!line) {
@@ -198,6 +252,12 @@ SMTPCmdLineParser.prototype.parseCommandLine = function (line) {
 	return command;
 };
 
+/**
+ * Static method to create a command line string terminated by the mandatory CRLF from the command line
+ * structure returned by parseCommandLine().
+ * @param command
+ * @returns {*}
+ */
 SMTPCmdLineParser.cmdToString = function (command) {
 	if (!command) {
 		return "NOOP\r\n";
@@ -246,7 +306,7 @@ SMTPCmdLineParser.cmdToString = function (command) {
 };
 
 SMTPCmdLineParser.prototype._cleanup = function () {
-	this.source.removeListener(this._streamListeners.onData);
-	this.source.removeListener(this._streamListeners.onEnd);
-	this.source.removeListener(this._streamListeners.onError);
+	this.source.removeListener('data', this._streamListeners.onData);
+	this.source.removeListener('end', this._streamListeners.onEnd);
+	this.source.removeListener('error', this._streamListeners.onError);
 };

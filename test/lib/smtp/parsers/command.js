@@ -1,5 +1,7 @@
 var expect = require("chai").expect;
+var events = require('events');
 var os = require('os');
+var stream = require('stream');
 var strfmt = require('util').format;
 var _ = require('underscore');
 
@@ -7,14 +9,20 @@ var SMTPCommandLineParser = require('../../../../src/lib/smtp/parsers/command');
 
 describe.only("SMTP Command Line Parser", function () {
 
-	it('Constructor returns a SMTPCommandLineParser instance.', function () {
-		var parser = new SMTPCommandLineParser({utf8: true});
-		expect(parser).to.be.instanceOf(SMTPCommandLineParser);
-		//noinspection BadExpressionStatementJS,JSUnresolvedVariable
-		expect(parser.utf8).to.be.true;
-		expect(parser.chunks).to.be.an('array');
-		expect(parser.totalSize).to.be.equal(0);
-		expect(parser.error).to.be.equal(false);
+	describe('Constructor', function () {
+		it('Constructor returns a SMTPCommandLineParser instance.', function () {
+			var parser = new SMTPCommandLineParser({utf8: true});
+			expect(parser).to.be.instanceOf(SMTPCommandLineParser);
+			//noinspection BadExpressionStatementJS,JSUnresolvedVariable
+			expect(parser.utf8).to.be.true;
+			expect(parser.chunks).to.be.an('array');
+			expect(parser.totalSize).to.be.equal(0);
+			expect(parser.error).to.be.equal(false);
+		});
+		it('SMTPCommandLineParser inherits from EventEmitter.', function () {
+			var parser = new SMTPCommandLineParser({utf8: true});
+			expect(parser).to.be.instanceOf(events.EventEmitter);
+		});
 	});
 
 	describe('parses command lines to SMTP commands', function () {
@@ -140,7 +148,7 @@ describe.only("SMTP Command Line Parser", function () {
 		});
 	});
 
-	describe.only('constructs valid SMTP commands from parsing results.', function () {
+	describe('constructs valid SMTP commands from parsing results.', function () {
 		it('empty input results in NOOP.', function () {
 			var cmdLine = SMTPCommandLineParser.cmdToString();
 			expect(cmdLine).to.be.equal("NOOP\r\n");
@@ -216,6 +224,106 @@ describe.only("SMTP Command Line Parser", function () {
 					]
 				}
 			)).to.be.equal("RCPT TO:<test@baleen.io> A=1 B=2 C=3\r\n");
+		});
+	});
+
+	describe('Stream API', function() {
+
+		it("parses simple SMTP command from streams.", function(done) {
+			var parser = new SMTPCommandLineParser();
+			parser.on('error', function(error) {
+				done(error);
+			});
+			parser.on('command', function(command) {
+				expect(command.verb).to.be.equal('QUIT');
+				done();
+			});
+			var inputStream = new stream.Readable();
+			inputStream._read = function noop() {};
+			parser.parse(inputStream);
+			inputStream.push("QUIT\r\n");
+		});
+
+		it("emits an error if the CRLF are in wrong order.", function(done) {
+			var parser = new SMTPCommandLineParser();
+			parser.on('error', function(error) {
+				done();
+			});
+			parser.on('command', function(command) {
+				done('Unexpected success.');
+			});
+			var inputStream = new stream.Readable();
+			inputStream._read = function noop() {};
+			parser.parse(inputStream);
+			inputStream.push("QUIT\n\r");
+		});
+
+		it("emits an error if the LF is missing.", function(done) {
+			var parser = new SMTPCommandLineParser();
+			parser.on('error', function(error) {
+				done();
+			});
+			parser.on('command', function(command) {
+				done('Unexpected success.');
+			});
+			var inputStream = new stream.Readable();
+			inputStream._read = function noop() {};
+			parser.parse(inputStream);
+			inputStream.push("QUIT\n");
+		});
+
+		it("emits an error if the CR is missing.", function(done) {
+			var parser = new SMTPCommandLineParser();
+			parser.on('error', function(error) {
+				done();
+			});
+			parser.on('command', function(command) {
+				done('Unexpected success.');
+			});
+			var inputStream = new stream.Readable();
+			inputStream._read = function noop() {};
+			parser.parse(inputStream);
+			inputStream.push("REST\r");
+			inputStream.push("RSET");
+		});
+
+		it("emits two separate command events when reading two consecutive commands.", function(done) {
+			var parser = new SMTPCommandLineParser();
+			var commands = [];
+			parser.on('error', function(error) {
+				done(error);
+			});
+			parser.on('command', function(command) {
+				commands.push(command);
+				if ( commands.length == 2 ) {
+					expect(commands[0].verb).to.equal("RSET");
+					expect(commands[1].verb).to.equal("QUIT");
+					done();
+				}
+			});
+			var inputStream = new stream.Readable();
+			inputStream._read = function noop() {};
+			parser.parse(inputStream);
+			inputStream.push("RSET\r\n");
+			inputStream.push("QUIT\r\n");
+		});
+
+
+		it("emits an error if the command line gets too long.", function(done) {
+			var parser = new SMTPCommandLineParser();
+			parser.on('error', function(error) {
+				expect(error.message).to.be.equal('Command line length exceeds maximum of 512 octets violating RFC 5321 section 4.5.3.1.4.');
+				done();
+			});
+			parser.on('command', function(command) {
+				done("Unexpected 'command' event.");
+			});
+			var inputStream = new stream.Readable();
+			inputStream._read = function noop() {};
+			parser.parse(inputStream);
+			for ( var idx = 0; idx < 105; idx++ ) {
+				inputStream.push("XXXX ");
+			}
 		});
 	});
 });
