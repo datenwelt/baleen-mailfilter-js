@@ -7,6 +7,9 @@ var strfmt = require('util').format;
 var tls = require('tls');
 var URI = require('urijs');
 
+var SMTPCommandLineParser = require('./parsers/command');
+var SMTPStartTls = require('./extensions/startTls');
+
 module.exports = SMTPClient;
 
 SMTPClient.prototype = Object.create(events.EventEmitter.prototype);
@@ -14,6 +17,7 @@ SMTPClient.prototype.constructor = SMTPClient;
 
 var SEND = 1;
 var RECV = 2;
+var SENDING = 3;
 
 function SMTPClient() {
 	var options = {
@@ -63,21 +67,12 @@ function SMTPClient() {
 	this.recvBuffers = [];
 	this.recvBuffersLength = 0;
 	this.recvLines = [];
-	this.lastCommand = false;
+	this.currentCommand = false;
 	this.tls = options.tls;
+
 	this.extensions = {
-		STARTTLS: {
-			required: this.scheme === 'smtp' && this.username,
-			prio: 0
-		}
+		STARTTLS: new SMTPStartTls({ mandatory: true })
 	};
-	if (this.username) {
-		this.extensions.AUTH = {
-			required: true,
-			prio: 1,
-			mechs: ['CRAM-MD5', 'LOGIN', 'PLAIN']
-		}
-	}
 }
 
 SMTPClient.prototype.connect = function () {
@@ -122,37 +117,22 @@ SMTPClient.prototype.connect = function () {
 	}, this));
 };
 
-SMTPClient.prototype.enable = function (extension, options) {
-	options = options || {};
-	var prio = Number.parse(options.prio);
-	if (Number.isNaN(prio)) {
-		prio = _.chain(this.extensions)
-			.keys()
-			.reduce(function (memo, key) {
-				var prio = this.extensions[key].prio || 0;
-				return prio > memo ? prio : memo;
-			}, 0, this);
-	} else {
-		var offset = 1;
-		_.chain(this.extensions)
-			.sortBy(function (key) {
-				return this.extensions[key].prio;
-			}, this)
-			.each(function (ext) {
-				if (ext.prio > prio) {
-					ext.prio = prio + offset;
-					offset++;
-				}
-			}, this);
-	}
-	if (!extension) return;
-	var ext = {};
-	ext[extension] = required ? 'required' : 'optional';
-	this.extensions.push()
+SMTPClient.prototype.enable = function (extension) {
+	this.extensions = _.filter(this.extensions, function (element) {
+		return element.verb != extension.verb;
+	});
+	this.extensions.push(extension);
+	return this;
 };
 
 SMTPClient.prototype.disable = function (extension) {
-
+	if (_.isString(extension)) {
+		extension = {verb: extension};
+	}
+	this.extensions = _.filter(this.extensions, function (element) {
+		return element.verb != extension.verb;
+	});
+	return this;
 };
 
 SMTPClient.prototype._upgradeConnection = function () {
@@ -192,13 +172,13 @@ SMTPClient.prototype.close = function (reason) {
 SMTPClient.prototype.processReply = function (reply) {
 	var error;
 	if (reply.code == 500) {
-		error = new Error(strfmt('Server indicates that our %s command exceeded size limit: %d %s', this.phase, reply.code, reply.message));
+		error = new Error(strfmt('Server indicates that our %s currentCommand exceeded size limit: %d %s', this.phase, reply.code, reply.message));
 		error.reply = reply;
 		return this.close(error);
 
 	}
 	if (reply.code == 501) {
-		error = new Error(strfmt('Server indicates a syntax error in our %s command: %d %s', this.phase, reply.code, reply.message));
+		error = new Error(strfmt('Server indicates a syntax error in our %s currentCommand: %d %s', this.phase, reply.code, reply.message));
 		error.reply = reply;
 		return this.close(error);
 	}
@@ -264,13 +244,8 @@ SMTPClient.prototype.processEhloReply = function (reply) {
 				if (matches)
 					this.session.ehlo.capabilities[matches[1]] = matches[2] || true;
 			}, this);
-			var nextAction = _.bind(this.quit, this, new Error('No further SMTP actions defined for this state.'));
-			if (!this.security && this.session.ehlo.capabilities['STARTTLS'] && this.useStartTls) {
-				nextAction = _.bind(this.startTls, this);
-			}
-			if (!this.security && !this.session.ehlo.capabilities['STARTTLS'] && this.useStartTls === 'required') {
-				nextAction = _.bind(this.close, this, new Error('STARTTLS required but not supported by server.'));
-			}
+
+			var nextAction = _.bind(this.selectExtensions, this);
 			return this._emitReply('ehlo', reply, nextAction);
 		case 504:
 		case 550:
@@ -301,8 +276,30 @@ SMTPClient.prototype.ehlo = function (name) {
 	return this.command(strfmt('EHLO %s', name || this.name));
 };
 
-SMTPClient.prototype.startTls = function () {
-	return this.command(strfmt('STARTTLS'));
+SMTPClient.prototype.selectExtensions = function () {
+	var readyFn = _.bind(function(result) {
+		if ( result && result instanceof Error ) {
+			this.close(result);
+			return;
+		}
+		var keyword = _.first(readyFn.keywords);
+		if ( keyword ) {
+			readyFn.keywords = _.rest(readyFn.keywords);
+			var extension = this.extensions[keyword].newInstance(this);
+			extension.enable(this, readyFn);
+		}
+		else {
+			readyFn.lastAction();
+		}
+	}, this);
+	var keywords = _.chain(this.extensions).keys().sortBy(function(keyword) {
+		return this.extensions[keyword].prio || 0;
+	}, this).value();
+	readyFn.keywords = keywords;
+	readyFn.lastAction = _.bind(function() {
+		this.mailFrom();
+	}, this);
+	readyFn();
 };
 
 SMTPClient.prototype.command = function (command) {
@@ -310,50 +307,31 @@ SMTPClient.prototype.command = function (command) {
 		this.close(new Error('Cannot send commands while not connected or waiting for server reply.'));
 		return;
 	}
-	command = command.trim();
-	this.lastCommand = command;
-	if (this.direction != SEND) {
-		this.close(new Error('Cannot send command while waiting on server response.'));
-		return;
-	}
-	var matches = /^(\S+).*/.exec(command);
-	if (!matches) {
-		this.close(new Error('Invalid syntax for SMTP command: %s', command));
-		return;
-	}
-	this.phase = matches[1];
-	command += "\r\n";
-	this.direction = RECV;
-	if (!this.socket.write(command)) {
-		this.socket.on('drain', _.bind(function () {
-			this.socket.write(command);
-			this.debug('[%s] C: %s', this, this.lastCommand.trim());
-		}, this));
-	} else {
-		this.debug('[%s] C: %s', this, this.lastCommand.trim());
-	}
-};
-
-SMTPClient.prototype._parseCommandLine = function (inputStream) {
-	var pos = 0;
-	var command = {};
-	var mode = 'VERB';
-	var tokenBegin = 0;
-	var _processToken = function (tokenEnd) {
-
-	};
-	while (pos < buffer.length) {
-		var tokenEnd = pos++;
-		var currentChar = buffer.readUInt8(currentPos);
-		if (currentChar == 0x20) {
-			continue;
-		}
-		if (currentChar == 0x0d) {
-
-			return command;
+	if (_.isString(command)) {
+		try {
+			command = new SMTPCommandLineParser().parseCommandLine(command);
+		} catch (error) {
+			this.close(error);
 		}
 	}
-	return command;
+	this.phase = command.verb;
+	this.currentCommand = command;
+	this.direction = SENDING;
+	var writeCommand = _.bind(function () {
+		var command = SMTPCommandLineParser.cmdToString(this.currentCommand);
+		if (this.socket.write(command)) {
+			this.debug('[%s] C: %s', this, command.replace("\r\n", ""));
+			this.direction = RECV;
+		} else {
+			return false;
+		}
+	}, this);
+	this.once('command', _.bind(function () {
+		if (!writeCommand()) {
+			this.socket.once('drain', writeCommand);
+		}
+	}, this));
+	this.emit('command', this.lastCommand, this);
 };
 
 SMTPClient.prototype.onClose = function () {
@@ -513,7 +491,7 @@ SMTPClient.prototype._emitReply = function (event, reply, defaultAction) {
 						break;
 					default:
 						callback.action = _.bind(function () {
-							this.command(next);
+							this.currentCommand(next);
 						}, this);
 				}
 			} else if (_.isFunction(next)) {

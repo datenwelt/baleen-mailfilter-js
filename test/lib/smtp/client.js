@@ -141,7 +141,7 @@ describe("SMTP Client", function () {
 			});
 		});
 
-		it("client closes connection with error if server does not offer neither SMTPS nor STARTTLS and STARTTLS is required.", function (done) {
+		it.only("client closes connection with error if server does not offer neither SMTPS nor STARTTLS and STARTTLS is required.", function (done) {
 			var serverPort = Math.floor(Math.random() * 20000) + 20000;
 			var server = new SMTPServer({secure: false, hideSTARTTLS: true});
 			server.listen(serverPort, "localhost", function (args) {
@@ -149,7 +149,7 @@ describe("SMTP Client", function () {
 				var client = new Client(uri, {tls: {rejectUnauthorized: false}, startTls: 'required'});
 				client.on('error', function (error) {
 					expect(error).to.exist;
-					expect(error.message).to.be.equal('STARTTLS required but not supported by server.');
+					expect(error.message).to.be.equal('STARTTLS is mandatory but server does not support STARTTLS.');
 					client.close();
 					server.close();
 					done();

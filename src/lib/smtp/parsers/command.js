@@ -37,7 +37,7 @@ function SMTPCmdLineParser() {
 	this.source = false;
 
 	/**
-	 * The maximum line length for a command line in octets. By default 512 octets.
+	 * The maximum line length for a currentCommand line in octets. By default 512 octets.
 	 * @type {number}
 	 */
 	this.maxLineLength = 512;
@@ -52,8 +52,8 @@ function SMTPCmdLineParser() {
 }
 
 /**
- * Parses command lines from the input stream and emits 'command' events whenever
- * an SMTP command is detected.
+ * Parses currentCommand lines from the input stream and emits 'currentCommand' events whenever
+ * an SMTP currentCommand is detected.
  *
  * @param inputStream
  */
@@ -144,7 +144,7 @@ SMTPCmdLineParser.prototype.onData = function (chunk) {
 		this.totalSize = 0;
 		previousChar = 0;
 		try {
-			this.emit('command', this.parseCommandLine(line.toString('utf8')));
+			this.emit('currentCommand', this.parseCommandLine(line.toString('utf8')));
 		} catch (error) {
 			return this.enterErrorState(error);
 		}
@@ -152,8 +152,8 @@ SMTPCmdLineParser.prototype.onData = function (chunk) {
 };
 
 /**
- * Parses a string into an SMTP command structure. The structure has properties 'verb' and 'params' where 'verb' is
- * the SMTP command itself and params is an array of key-value pairs (objects) for all passed command parameters.
+ * Parses a string into an SMTP currentCommand structure. The structure has properties 'verb' and 'params' where 'verb' is
+ * the SMTP currentCommand itself and params is an array of key-value pairs (objects) for all passed currentCommand parameters.
  * Command parameters have the form of KEYWORD=VALUE which are represented in Javascript as an object { KEY: 'VALUE' }.
  * There is one object for each parameter.
  *
@@ -162,13 +162,13 @@ SMTPCmdLineParser.prototype.onData = function (chunk) {
  *
  * These arguments are stored in the properties 'domain', 'returnPath', 'forwardPath' for each of these commands respectively.
  *
- * @param line the command line as a string.
- * @returns {{verb: *}} the command structure as described above.
+ * @param line the currentCommand line as a string.
+ * @returns {{verb: *}} the currentCommand structure as described above.
  */
 SMTPCmdLineParser.prototype.parseCommandLine = function (line) {
 	var verb, params;
 	if (!line) {
-		throw new Error('Unable to parse empty command line.');
+		throw new Error('Unable to parse empty currentCommand line.');
 	}
 	if (line instanceof Buffer) {
 		line = line.toString('utf8');
@@ -186,7 +186,7 @@ SMTPCmdLineParser.prototype.parseCommandLine = function (line) {
 	switch (verb) {
 		case 'EHLO':
 			if (!parts.length) {
-				throw new Error('EHLO command without domain or address literal.');
+				throw new Error('EHLO currentCommand without domain or address literal.');
 			}
 			command.domain = _.first(parts);
 			parts = _.rest(parts);
@@ -194,7 +194,7 @@ SMTPCmdLineParser.prototype.parseCommandLine = function (line) {
 			break;
 		case 'MAIL':
 			if (!parts.length) {
-				throw new Error('MAIL command without return path (FROM:<...>).');
+				throw new Error('MAIL currentCommand without return path (FROM:<...>).');
 			}
 			command.returnPath = _.first(parts);
 			matches = /FROM:(\S+)/.exec(command.returnPath);
@@ -212,7 +212,7 @@ SMTPCmdLineParser.prototype.parseCommandLine = function (line) {
 			break;
 		case 'RCPT':
 			if (!parts.length) {
-				throw new Error('RCPT command without forward path (TO:<...>).');
+				throw new Error('RCPT currentCommand without forward path (TO:<...>).');
 			}
 			command.forwardPath = _.first(parts);
 			matches = /TO:(\S+)/.exec(command.forwardPath);
@@ -253,7 +253,7 @@ SMTPCmdLineParser.prototype.parseCommandLine = function (line) {
 };
 
 /**
- * Static method to create a command line string terminated by the mandatory CRLF from the command line
+ * Static method to create a currentCommand line string terminated by the mandatory CRLF from the currentCommand line
  * structure returned by parseCommandLine().
  * @param command
  * @returns {*}
@@ -263,14 +263,14 @@ SMTPCmdLineParser.cmdToString = function (command) {
 		return "NOOP\r\n";
 	}
 	if (!command.verb) {
-		throw new Error('Need an object with at least a property "verb" to construct a command line. { verb: ...}.');
+		throw new Error('Need an object with at least a property "verb" to construct a currentCommand line. { verb: ...}.');
 	}
 	var commandLine = "";
 	commandLine += command.verb;
 	switch (command.verb) {
 		case 'EHLO':
 			if (!command.domain) {
-				throw new Error('EHLO command needs a "domain" property with the domain or an address literal of the client. { verb: "EHLO", domain: "..."}');
+				throw new Error('EHLO currentCommand needs a "domain" property with the domain or an address literal of the client. { verb: "EHLO", domain: "..."}');
 			}
 			commandLine += " " + command.domain;
 			break;
@@ -279,7 +279,7 @@ SMTPCmdLineParser.cmdToString = function (command) {
 			break;
 		case 'RCPT':
 			if (!command.forwardPath) {
-				throw new Error('RCPT command needs a "forwardPath" property with the address of the recipient. { verb: "EHLO", forwardPath: "...@..."}');
+				throw new Error('RCPT currentCommand needs a "forwardPath" property with the address of the recipient. { verb: "EHLO", forwardPath: "...@..."}');
 			}
 			commandLine += " TO:<" + command.forwardPath + ">";
 			break;
