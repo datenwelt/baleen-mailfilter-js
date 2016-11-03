@@ -58,7 +58,7 @@ describe('ESMTP Plugin - STARTTLS', function () {
 			});
 		});
 
-		it.only('activates TLS on insecure connections', function (done) {
+		it('activates TLS on insecure connections', function (done) {
 			var serverPort = Math.floor(Math.random() * 20000) + 20000;
 			var server = new SMTPServer({secure: false});
 			var startTls = new SMTPStartTls();

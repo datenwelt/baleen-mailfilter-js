@@ -89,7 +89,7 @@ describe("SMTP Client", function () {
 				client.connect().then(function () {
 					expect(client.phase).to.be.equal('GREETING');
 					expect(client.session).to.exist;
-					expect(client.session.connect).to.exist;
+					expect(client.session.CONNECT).to.exist;
 					server.close();
 					done();
 				}).catch(function (error) {
@@ -158,8 +158,8 @@ describe("SMTP Client", function () {
 				try {
 					expect(reply).to.exist;
 					expect(reply.code).to.be.equal(220);
-					expect(client.session.greeting).to.exist;
-					expect(client.session.greeting.domain).to.be.equal(os.hostname());
+					expect(client.session.GREETING).to.exist;
+					expect(client.session.GREETING.domain).to.be.equal(os.hostname());
 					callback(_.bind(client.close, client));
 					done();
 				} catch (err) {
@@ -201,8 +201,8 @@ describe("SMTP Client", function () {
 			var uri = strfmt('smtp://localhost:%d', serverPort);
 			var client = new Client(uri);
 			client.on('ehlo', function (reply, callback) {
-				expect(client.session.ehlo).to.exist;
-				expect(client.session.ehlo.domain).to.be.equal(os.hostname());
+				expect(client.session.EHLO).to.exist;
+				expect(client.session.EHLO.domain).to.be.equal(os.hostname());
 
 				callback('QUIT');
 				done();
@@ -220,11 +220,11 @@ describe("SMTP Client", function () {
 			var client = new Client(uri);
 			client.on('ehlo', function (reply, callback) {
 				try {
-					expect(client.session.ehlo).to.exist;
-					expect(client.session.ehlo.capabilities).to.exist;
-					expect(client.session.ehlo.capabilities.XFORWARD).to.exist;
-					expect(client.session.ehlo.capabilities.STARTTLS).to.exist;
-					expect(client.session.ehlo.capabilities.AUTH).to.exist;
+					expect(client.session.EHLO).to.exist;
+					expect(client.session.EHLO.capabilities).to.exist;
+					expect(client.session.EHLO.capabilities.XFORWARD).to.exist;
+					expect(client.session.EHLO.capabilities.STARTTLS).to.exist;
+					expect(client.session.EHLO.capabilities.AUTH).to.exist;
 					done();
 				} catch (error) {
 					done(error);
@@ -250,7 +250,7 @@ describe("SMTP Client", function () {
 				client.connect().then(function () {
 					expect(client.phase).to.be.equal('GREETING');
 					expect(client.session).to.exist;
-					expect(client.session.connect).to.exist;
+					expect(client.session.CONNECT).to.exist;
 					expect(client.security.type).to.equal('SMTPS');
 					expect(client.security.protocol).to.equal('TLSv1.2');
 					client.close();
