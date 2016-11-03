@@ -58,7 +58,9 @@ function SMTPClient() {
 	this.password = uri.password();
 	this.phase = false;
 	this.uri = uri;
-	this.uri.password('xxx');
+	if (this.uri.password()) {
+		this.uri.password('xxx');
+	}
 	this.uri = this.uri.toString();
 	this.socket = false;
 	this.logger = options.logger;
@@ -69,9 +71,14 @@ function SMTPClient() {
 	this.recvLines = [];
 	this.currentCommand = false;
 	this.tls = options.tls;
+	this.SEND = SEND;
+	this.RECV = RECV;
+	this.SENDING = SENDING;
+
+
 
 	this.extensions = {
-		STARTTLS: new SMTPStartTls({ mandatory: true })
+		STARTTLS: new SMTPStartTls({mandatory: true})
 	};
 }
 
@@ -118,10 +125,10 @@ SMTPClient.prototype.connect = function () {
 };
 
 SMTPClient.prototype.enable = function (extension) {
-	this.extensions = _.filter(this.extensions, function (element) {
-		return element.verb != extension.verb;
+	this.extensions = _.omit(this.extensions, function (value, key) {
+		return key === extension.keyword;
 	});
-	this.extensions.push(extension);
+	this.extensions[extension.keyword] = extension;
 	return this;
 };
 
@@ -197,7 +204,6 @@ SMTPClient.prototype.processReply = function (reply) {
 				return this.processQuitReply(reply);
 			default:
 				return this.processUnknownCommandReply(reply);
-				throw (new Error(strfmt('Unexpected STMP conversation phase: %s', this.phase)));
 		}
 	} catch (error) {
 		error.reply = error.reply || reply;
@@ -206,14 +212,20 @@ SMTPClient.prototype.processReply = function (reply) {
 };
 
 SMTPClient.prototype.processUnknownCommandReply = function (reply) {
-
+	var listenerCount = this.listenerCount(this.phase);
+	if (!listenerCount)
+		return this.close(new Error(strfmt('Unexpected STMP conversation phase: %s', this.phase)));
+	var readyFn = _.bind(function() {
+		this.close(new Error(strfmt('SMTP phase %s has not been finished properly. Closing connection.', this.phase)));
+	}, this);
+	this._emitReply(this.phase, reply, readyFn);
 };
 
 SMTPClient.prototype.processGreeting = function (reply) {
 	switch (reply.code) {
 		case 220:
 			var remoteName = _.first(reply.message.split(" "));
-			this.session.greeting = {
+			this.session.GREETING = {
 				domain: remoteName,
 				reply: reply
 			};
@@ -233,16 +245,16 @@ SMTPClient.prototype.processEhloReply = function (reply) {
 				this.close(new Error(strfmt('Received ill formatted response from server: %d %s', this, reply.replyCode, reply.lines[0])));
 				return true;
 			}
-			this.session.ehlo = {
+			this.session.EHLO = {
 				domain: matches[1],
 				greet: matches[2],
 				reply: reply
 			};
-			this.session.ehlo.capabilities = {};
+			this.session.EHLO.capabilities = {};
 			_.chain(reply.lines).rest(1).each(function (line) {
 				var matches = /(\w+)(?: (.+))?/.exec(line);
 				if (matches)
-					this.session.ehlo.capabilities[matches[1]] = matches[2] || true;
+					this.session.EHLO.capabilities[matches[1]] = matches[2] || true;
 			}, this);
 
 			var nextAction = _.bind(this.selectExtensions, this);
@@ -277,13 +289,13 @@ SMTPClient.prototype.ehlo = function (name) {
 };
 
 SMTPClient.prototype.selectExtensions = function () {
-	var readyFn = _.bind(function(result) {
-		if ( result && result instanceof Error ) {
+	var readyFn = _.bind(function (result) {
+		if (result && result instanceof Error) {
 			this.close(result);
 			return;
 		}
 		var keyword = _.first(readyFn.keywords);
-		if ( keyword ) {
+		if (keyword) {
 			readyFn.keywords = _.rest(readyFn.keywords);
 			var extension = this.extensions[keyword].newInstance(this);
 			extension.enable(this, readyFn);
@@ -292,12 +304,15 @@ SMTPClient.prototype.selectExtensions = function () {
 			readyFn.lastAction();
 		}
 	}, this);
-	var keywords = _.chain(this.extensions).keys().sortBy(function(keyword) {
+	var keywords = _.chain(this.extensions).keys().sortBy(function (keyword) {
 		return this.extensions[keyword].prio || 0;
 	}, this).value();
 	readyFn.keywords = keywords;
-	readyFn.lastAction = _.bind(function() {
-		this.mailFrom();
+	readyFn.lastAction = _.bind(function () {
+		var nextAction = _.bind(function () {
+			this.mailFrom();
+		}, this);
+		this._emitReply('ESMTP', null, nextAction);
 	}, this);
 	readyFn();
 };
@@ -349,7 +364,7 @@ SMTPClient.prototype.processConnect = function () {
 	this.socket.on('close', _.bind(this.onClose, this));
 	this.socket.on('end', _.bind(this.onEnd, this));
 	this.socket.on('data', _.bind(this.onData, this));
-	this.session.connect = {
+	this.session.CONNECT = {
 		server: {
 			addr: this.socket.remoteAddress,
 			port: this.socket.remotePort,

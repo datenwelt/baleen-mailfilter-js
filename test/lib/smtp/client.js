@@ -98,71 +98,6 @@ describe("SMTP Client", function () {
 				});
 			});
 		});
-
-	});
-
-	describe("SMTPS / SMTP over TLS", function () {
-		it("connect() resolves a promise when connecting.", function (done) {
-			var serverPort = Math.floor(Math.random() * 20000) + 20000;
-			var server = new SMTPServer({secure: true});
-			server.listen(serverPort, "localhost", function (args) {
-				var uri = strfmt('smtps://localhost:%d', serverPort);
-				var client = new Client(uri, {tls: {rejectUnauthorized: false}});
-				client.connect().then(function () {
-					expect(client.phase).to.be.equal('GREETING');
-					expect(client.session).to.exist;
-					expect(client.session.connect).to.exist;
-					expect(client.security.type).to.equal('SMTPS');
-					expect(client.security.protocol).to.equal('TLSv1.2');
-					client.close();
-					server.close();
-					done();
-				}).catch(function (error) {
-					done(error);
-					client.close();
-					server.close();
-				});
-			});
-		});
-
-		it("connect() rejects by default if server has self signed certificate.", function (done) {
-			var serverPort = Math.floor(Math.random() * 20000) + 20000;
-			var server = new SMTPServer({secure: true});
-			server.listen(serverPort, "localhost", function (args) {
-				var uri = strfmt('smtps://localhost:%d', serverPort);
-				var client = new Client(uri, {tls: {rejectUnauthorized: true}});
-				client.connect().then(function () {
-					server.close();
-					done(new Error("Promise should not resolve."));
-				}).catch(function (error) {
-					done();
-					server.close();
-				});
-			});
-		});
-
-		it.only("client closes connection with error if server does not offer neither SMTPS nor STARTTLS and STARTTLS is required.", function (done) {
-			var serverPort = Math.floor(Math.random() * 20000) + 20000;
-			var server = new SMTPServer({secure: false, hideSTARTTLS: true});
-			server.listen(serverPort, "localhost", function (args) {
-				var uri = strfmt('smtp://localhost:%d', serverPort);
-				var client = new Client(uri, {tls: {rejectUnauthorized: false}, startTls: 'required'});
-				client.on('error', function (error) {
-					expect(error).to.exist;
-					expect(error.message).to.be.equal('STARTTLS is mandatory but server does not support STARTTLS.');
-					client.close();
-					server.close();
-					done();
-				});
-				client.connect().then(function () {
-				}).catch(function (error) {
-					client.close();
-					server.close();
-					done(error);
-				});
-			});
-		});
-
 		it("client reaches EHLO/HELO phase after connecting.", function (done) {
 			var serverPort = Math.floor(Math.random() * 20000) + 20000;
 			var server = new SMTPServer({secure: true});
@@ -173,6 +108,7 @@ describe("SMTP Client", function () {
 					callback(_.bind(client.close, client));
 				});
 				client.on('close', function () {
+					server.close();
 					done();
 				});
 				client.on('error', function (error) {
@@ -187,6 +123,7 @@ describe("SMTP Client", function () {
 		});
 
 	});
+
 
 	describe("Server greeting", function () {
 		var serverPort;
@@ -302,6 +239,70 @@ describe("SMTP Client", function () {
 				done(error);
 			});
 		});
+	});
+	describe("SMTPS / SMTP over TLS", function () {
+		it("connect() resolves a promise when connecting.", function (done) {
+			var serverPort = Math.floor(Math.random() * 20000) + 20000;
+			var server = new SMTPServer({secure: true});
+			server.listen(serverPort, "localhost", function (args) {
+				var uri = strfmt('smtps://localhost:%d', serverPort);
+				var client = new Client(uri, {tls: {rejectUnauthorized: false}});
+				client.connect().then(function () {
+					expect(client.phase).to.be.equal('GREETING');
+					expect(client.session).to.exist;
+					expect(client.session.connect).to.exist;
+					expect(client.security.type).to.equal('SMTPS');
+					expect(client.security.protocol).to.equal('TLSv1.2');
+					client.close();
+					server.close();
+					done();
+				}).catch(function (error) {
+					done(error);
+					client.close();
+					server.close();
+				});
+			});
+		});
+
+		it("connect() rejects by default if server has self signed certificate.", function (done) {
+			var serverPort = Math.floor(Math.random() * 20000) + 20000;
+			var server = new SMTPServer({secure: true});
+			server.listen(serverPort, "localhost", function (args) {
+				var uri = strfmt('smtps://localhost:%d', serverPort);
+				var client = new Client(uri, {tls: {rejectUnauthorized: true}});
+				client.connect().then(function () {
+					server.close();
+					done(new Error("Promise should not resolve."));
+				}).catch(function (error) {
+					done();
+					server.close();
+				});
+			});
+		});
+
+		it("client closes connection with error if server does not offer neither SMTPS nor STARTTLS and STARTTLS is required.", function (done) {
+			var serverPort = Math.floor(Math.random() * 20000) + 20000;
+			var server = new SMTPServer({secure: false, hideSTARTTLS: true});
+			server.listen(serverPort, "localhost", function (args) {
+				var uri = strfmt('smtp://localhost:%d', serverPort);
+				var client = new Client(uri, {tls: {rejectUnauthorized: false}, startTls: 'required'});
+				client.on('error', function (error) {
+					expect(error).to.exist;
+					expect(error.message).to.be.equal('STARTTLS is mandatory but server does not support STARTTLS.');
+					client.close();
+					server.close();
+					done();
+				});
+				client.connect().then(function () {
+				}).catch(function (error) {
+					client.close();
+					server.close();
+					done(error);
+				});
+			});
+		});
+
+
 	});
 
 });
