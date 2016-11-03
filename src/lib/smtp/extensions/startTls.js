@@ -29,10 +29,9 @@ SMTPStartTls.prototype.enable = function (client, ready) {
 	}
 	if (!client.session.EHLO.capabilities['STARTTLS']) {
 		if (this.mandatory) {
-			ready(new Error('STARTTLS is mandatory but server does not support STARTTLS.'));
-			return;
+			return ready(new Error('STARTTLS is mandatory but server does not support STARTTLS.'));
 		} else {
-			ready();
+			return ready();
 		}
 	}
 	this.readyFn = ready;
@@ -73,9 +72,9 @@ SMTPStartTls.prototype.startTls = function (reply) {
 		this.session = _.pick(this.session, ['CONNECT', 'GREETING', 'STARTTLS']);
 		this.ehlo();
 	}, client));
-	client.socket.on('error', function (error) {
+	client.socket.on('error', _.bind(function (error) {
 		this.readyFn(new Error(strfmt('Unable to upgrade connection with STARTTLS: %s', error.message)));
-	});
+	}, this));
 
 };
 
