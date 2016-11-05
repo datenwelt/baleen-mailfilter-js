@@ -1,5 +1,4 @@
 var _ = require('underscore');
-var sasl = require('saslmechanisms');
 var strfmt = require('util').format;
 
 var SMTPExtension = require('../extension');
@@ -9,9 +8,6 @@ module.exports = SMTPAuthPlain;
 
 SMTPAuthPlain.prototype = Object.create(SMTPExtension.prototype);
 SMTPAuthPlain.prototype.constructor = SMTPAuthPlain;
-
-var saslFactory = new sasl.Factory();
-saslFactory.use(require('sasl-plain'));
 
 function SMTPAuthPlain(options) {
 	SMTPExtension.call(this, 'AUTH PLAIN', {
@@ -44,13 +40,12 @@ SMTPAuthPlain.prototype.enable = function (client, ready) {
 	if (!_.contains(client.session.EHLO.capabilities.AUTH.split(/\s+/), 'PLAIN')) {
 		return ready();
 	}
-		this.readyFn = ready;
-	var mech = saslFactory.create(['PLAIN']);
-	var resp = mech.response({username: client.username, password: client.password});
-	resp = Buffer.from(resp).toString('BASE64');
-	client.command('AUTH PLAIN ' + resp);
-	client.once('AUTH', _.bind(function(reply) {
-		if ( reply.code != 235 ) {
+	this.readyFn = ready;
+	var authInfo = Buffer.from("\0" + client.username + "\0" + client.password);
+	authInfo = authInfo.toString('BASE64');
+	client.command('AUTH PLAIN ' + authInfo);
+	client.once('AUTH', _.bind(function (reply) {
+		if (reply.code != 235) {
 			this.readyFn(new Error(strfmt('Unable to authenticate to server: %d %s', reply.code, reply.message)));
 		}
 		this.client.session.AUTH = {

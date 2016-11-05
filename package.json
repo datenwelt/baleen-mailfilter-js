@@ -26,8 +26,6 @@
     "amqplib": "^0.4.2",
     "bunyan": "^1.8.1",
     "cargo-js": "https://github.com/datenwelt/cargo-js#v0.1.4",
-    "sasl-plain": "^0.1.0",
-    "saslmechanisms": "^0.1.1",
     "smtp-protocol": "^2.4.7",
     "smtp-server": "^1.15.0",
     "underscore": "^1.8.3",
