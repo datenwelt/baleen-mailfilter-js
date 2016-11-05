@@ -4,7 +4,7 @@
   "description": "SMTP capable mail filter for use as before queue filter for postfix and other MTAs.",
   "main": "src/baleen.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "./node_modules/.bin/mocha --reporter spec"
   },
   "repository": {
     "type": "git",
@@ -26,6 +26,8 @@
     "amqplib": "^0.4.2",
     "bunyan": "^1.8.1",
     "cargo-js": "https://github.com/datenwelt/cargo-js#v0.1.4",
+    "sasl-plain": "^0.1.0",
+    "saslmechanisms": "^0.1.1",
     "smtp-protocol": "^2.4.7",
     "smtp-server": "^1.15.0",
     "underscore": "^1.8.3",
@@ -34,8 +36,5 @@
   "devDependencies": {
     "chai": "^3.5.0",
     "mocha": "^3.1.2"
-  },
-  "scripts": {
-    "test": "./node_modules/.bin/mocha --reporter spec"
   }
 }

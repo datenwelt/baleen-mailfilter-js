@@ -10,6 +10,7 @@ var URI = require('urijs');
 var SMTPCommandLineParser = require('./parsers/command');
 var SMTPStartTls = require('./extensions/startTls');
 var SMTPSize = require('./extensions/size');
+var SMTPAuthPlain = require('./extensions/authPlain');
 
 module.exports = SMTPClient;
 
@@ -80,7 +81,8 @@ function SMTPClient() {
 
 	this.extensions = {
 		STARTTLS: new SMTPStartTls({mandatory: false}),
-		SIZE: new SMTPSize()
+		SIZE: new SMTPSize(),
+		'AUTH PLAIN': new SMTPAuthPlain()
 	};
 }
 
@@ -180,6 +182,8 @@ SMTPClient.prototype.close = function (reason) {
 
 SMTPClient.prototype.processReply = function (reply) {
 	var error;
+	if ( this.phase == 'ERROR' )
+		return;
 	if (reply.code == 500) {
 		error = new Error(strfmt('Server indicates that our %s command exceeded size limit: %d %s / command was: %j', this.phase, reply.code, reply.message, this.currentCommand));
 		error.reply = reply;
