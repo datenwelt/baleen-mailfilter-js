@@ -7,7 +7,7 @@ var SMTPClient = require('../../../../src/lib/smtp/client');
 var SMTPSize = require('../../../../src/lib/smtp/extensions/size');
 var SMTPExtension = require('../../../../src/lib/smtp/extension');
 
-describe.only('ESMTP Plugin - SIZE', function () {
+describe('ESMTP Plugin - SIZE', function () {
 
 	describe('constructor', function () {
 

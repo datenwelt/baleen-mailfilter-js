@@ -1,5 +1,6 @@
 var SMTPServer = require('smtp-server').SMTPServer;
 var Client = require('../../../src/lib/smtp/client');
+var SMTPStartTls = require('../../../src/lib/smtp/extensions/startTls');
 var expect = require("chai").expect;
 var os = require('os');
 var strfmt = require('util').format;
@@ -285,7 +286,9 @@ describe("SMTP Client", function () {
 			var server = new SMTPServer({secure: false, hideSTARTTLS: true});
 			server.listen(serverPort, "localhost", function (args) {
 				var uri = strfmt('smtp://localhost:%d', serverPort);
-				var client = new Client(uri, {tls: {rejectUnauthorized: false}, startTls: 'required'});
+				var client = new Client(uri, {tls: {rejectUnauthorized: false}});
+				var startTls = new SMTPStartTls({mandatory: true});
+				client.enable(startTls);
 				client.on('error', function (error) {
 					expect(error).to.exist;
 					expect(error.message).to.be.equal('STARTTLS is mandatory but server does not support STARTTLS.');
