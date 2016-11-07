@@ -73,17 +73,23 @@ function SMTPClient() {
 	this.recvLines = [];
 	this.currentCommand = false;
 	this.tls = options.tls;
+
 	this.SEND = SEND;
 	this.RECV = RECV;
 	this.SENDING = SENDING;
-
-
 
 	this.extensions = {
 		STARTTLS: new SMTPStartTls({mandatory: false}),
 		SIZE: new SMTPSize(),
 		'AUTH PLAIN': new SMTPAuthPlain()
 	};
+
+	this.envelope = {
+		mailFrom: false,
+		rcptTo: []
+	};
+	this.data = false;
+
 }
 
 SMTPClient.prototype.connect = function () {
@@ -126,6 +132,12 @@ SMTPClient.prototype.connect = function () {
 		}, this));
 		this.socket.on('error', onConnectError);
 	}, this));
+};
+
+SMTPClient.prototype.send = function (mailFrom, rcptTo, data) {
+	this.envelope.mailFrom = mailFrom;
+	this.envelope.rcptTo = _.isArray(rcptTo) ? rcptTo : [rcptTo]
+
 };
 
 SMTPClient.prototype.enable = function (extension) {
@@ -182,7 +194,7 @@ SMTPClient.prototype.close = function (reason) {
 
 SMTPClient.prototype.processReply = function (reply) {
 	var error;
-	if ( this.phase == 'ERROR' )
+	if (this.phase == 'ERROR')
 		return;
 	if (reply.code == 500) {
 		error = new Error(strfmt('Server indicates that our %s command exceeded size limit: %d %s / command was: %j', this.phase, reply.code, reply.message, this.currentCommand));
@@ -221,7 +233,7 @@ SMTPClient.prototype.processUnknownCommandReply = function (reply) {
 	var listenerCount = this.listenerCount(this.phase);
 	if (!listenerCount)
 		return this.close(new Error(strfmt('Unexpected STMP conversation phase: %s', this.phase)));
-	var readyFn = _.bind(function() {
+	var readyFn = _.bind(function () {
 		this.close(new Error(strfmt('SMTP phase %s has not been finished properly. Closing connection.', this.phase)));
 	}, this);
 	this._emitReply(this.phase, reply, readyFn);
@@ -293,6 +305,7 @@ SMTPClient.prototype.helo = function (name) {
 SMTPClient.prototype.ehlo = function (name) {
 	return this.command(strfmt('EHLO %s', name || this.name));
 };
+
 
 SMTPClient.prototype.selectExtensions = function () {
 	var readyFn = _.bind(function (result) {
