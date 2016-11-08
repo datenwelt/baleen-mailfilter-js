@@ -4,7 +4,7 @@
   "description": "SMTP capable mail filter for use as before queue filter for postfix and other MTAs.",
   "main": "src/baleen.js",
   "scripts": {
-    "test": "./node_modules/.bin/mocha --reporter spec"
+    "test": "./node_modules/.bin/mocha --recursive --reporter spec"
   },
   "repository": {
     "type": "git",
