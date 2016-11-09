@@ -47,13 +47,13 @@ SMTPAuthLogin.prototype.enable = function (client, ready) {
 			return this.readyFn(new Error(strfmt('Unable to authenticate to server: %d %s', reply.code, reply.message)));
 		}
 		var username = Buffer.from(client.username).toString('BASE64');
-		this.client.command(username);
-		this.client.once(username, _.bind(function (reply) {
+		this.client.command({ verb: username, phase:"authLoginPassword" });
+		this.client.once("authLoginPassword", _.bind(function (reply) {
 			if (reply.code != 334)
 				return this.readyFn(new Error(strfmt('Unable to authenticate to server: %d %s', reply.code, reply.message)));
 			var password = Buffer.from(client.password).toString('BASE64');
-			this.client.command(password);
-			this.client.once(password, _.bind(function (reply) {
+			this.client.command({verb: password, phase: "authLoginPassword"});
+			this.client.once("authLoginPassword", _.bind(function (reply) {
 				if (reply.code != 235)
 					return this.readyFn(new Error(strfmt('Unable to authenticate to server: %d %s', reply.code, reply.message)));
 				this.client.session.AUTH = {

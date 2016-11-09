@@ -56,8 +56,8 @@ SMTPAuthCramMd5.prototype.enable = function (client, ready) {
 		var response = hmac.digest().toString('hex').toLowerCase();
 		response = client.username + " " + response;
 		response = Buffer.from(response).toString('BASE64');
-		client.command(response);
-		client.once(response, _.bind(function (reply) {
+		client.command({ verb: response, phase: "authCramMd5ChallengeResponse"});
+		client.once("authCramMd5ChallengeResponse", _.bind(function (reply) {
 			if (reply.code != 235)
 				return this.readyFn(new Error(strfmt('Unable to authenticate to server via CRAM-MD5: %d %s', reply.code, reply.message)));
 			this.client.session.AUTH = {

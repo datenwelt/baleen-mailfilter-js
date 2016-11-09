@@ -348,7 +348,7 @@ SMTPClient.prototype.command = function (command) {
 			this.close(error);
 		}
 	}
-	this.phase = command.verb;
+	this.phase = command.phase || command.verb;
 	this.currentCommand = command;
 	this.direction = SENDING;
 	var writeCommand = _.bind(function () {
