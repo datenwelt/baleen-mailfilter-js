@@ -198,7 +198,7 @@ describe("SMTP Client", function () {
 			}
 		});
 
-		it("EHLO is sent by default and event is triggered.", function(done) {
+		it("EHLO is sent by default and event is triggered.", function (done) {
 			var uri = strfmt('smtp://localhost:%d', serverPort);
 			var client = new Client(uri);
 			client.on('ehlo', function (reply, callback) {
@@ -211,12 +211,12 @@ describe("SMTP Client", function () {
 			client.on('error', function (error) {
 				done(error);
 			});
-			client.connect().catch(function(error) {
+			client.connect().catch(function (error) {
 				done(error);
 			});
 		});
 
-		it("EHLO collects available SMTP extensions.", function(done) {
+		it("EHLO collects available SMTP extensions.", function (done) {
 			var uri = strfmt('smtp://localhost:%d', serverPort);
 			var client = new Client(uri);
 			client.on('ehlo', function (reply, callback) {
@@ -236,7 +236,7 @@ describe("SMTP Client", function () {
 			client.on('error', function (error) {
 				done(error);
 			});
-			client.connect().catch(function(error) {
+			client.connect().catch(function (error) {
 				done(error);
 			});
 		});
@@ -305,6 +305,99 @@ describe("SMTP Client", function () {
 			});
 		});
 
+
+	});
+	describe.only('Command MAIL FROM', function () {
+		var serverPort;
+		var server;
+
+		beforeEach("Starting the test SMTP server.", function (done) {
+			serverPort = Math.floor(Math.random() * 20000) + 20000;
+			server = new SMTPServer({
+				useXForward: true
+			});
+			server.listen(serverPort, "localhost", function (args) {
+				done();
+			});
+		});
+
+		afterEach("Stopping the test SMTP server.", function (done) {
+			if (server) {
+				server.close(function () {
+					done();
+				});
+				server = undefined;
+			}
+		});
+
+		it('Emits no error if no envelope or sender is defined (i.e. MAILER-DAEMON is sender).', function (done) {
+			var serverPort = Math.floor(Math.random() * 20000) + 20000;
+			var server = new SMTPServer({secure: false, hideSTARTTLS: true, authOptional: true});
+			server.listen(serverPort, "localhost", function (args) {
+				var uri = strfmt('smtp://localhost:%d', serverPort);
+				var client = new Client(uri, {tls: {rejectUnauthorized: false}});
+				client.on('MAIL', function (reply, callback) {
+					expect(reply.code).to.be.equal(250);
+					callback('QUIT');
+					done();
+				});
+				client.on('error', function (error) {
+					done(error);
+				});
+				client.connect().catch(function (error) {
+					done(error);
+				});
+
+			});
+		});
+
+
+		it('emits an error if server does not accept sender address.', function (done) {
+			var serverPort = Math.floor(Math.random() * 20000) + 20000;
+			var server = new SMTPServer({secure: false, hideSTARTTLS: true, authOptional: true});
+			server.listen(serverPort, "localhost", function (args) {
+				var uri = strfmt('smtp://localhost:%d', serverPort);
+				var client = new Client(uri, {tls: {rejectUnauthorized: false}});
+				client.envelope.mailFrom = "<öääää@xyz.de>";
+				client.on('MAIL', function () {
+					done(new Error('MAIL FROM command succeeded unexpectedly.'));
+				});
+				client.on('error', function (error) {
+					try {
+						expect(error.message).to.be.equal('Server indicates a syntax error in our MAIL command: 501 Error: Bad sender address syntax');
+						done();
+					} catch (error) {
+						done(error);
+					}
+				});
+				client.connect().catch(function (error) {
+					done(error);
+				});
+
+			});
+		});
+
+		it('emits MAIL event on valid return paths in envelope commands.', function (done) {
+			var serverPort = Math.floor(Math.random() * 20000) + 20000;
+			var server = new SMTPServer({secure: false, hideSTARTTLS: true, authOptional: true});
+			server.listen(serverPort, "localhost", function (args) {
+				var uri = strfmt('smtp://localhost:%d', serverPort);
+				var client = new Client(uri, {tls: {rejectUnauthorized: false}});
+				client.envelope.mailFrom = "abc@xyz.org";
+				client.on('MAIL', function (reply, callback) {
+					expect(reply.code).to.be.equal(250);
+					callback('QUIT');
+					done();
+				});
+				client.on('error', function (error) {
+					done(error);
+				});
+				client.connect().catch(function (error) {
+					done(error);
+				});
+
+			});
+		});
 
 	});
 

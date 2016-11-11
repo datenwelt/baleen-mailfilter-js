@@ -203,7 +203,7 @@ SMTPClient.prototype.processReply = function (reply) {
 
 	}
 	if (reply.code == 501) {
-		error = new Error(strfmt('Server indicates a syntax error in our %s currentCommand: %d %s', this.phase, reply.code, reply.message));
+		error = new Error(strfmt('Server indicates a syntax error in our %s command: %d %s', this.phase, reply.code, reply.message));
 		error.reply = reply;
 		return this.close(error);
 	}
@@ -218,6 +218,8 @@ SMTPClient.prototype.processReply = function (reply) {
 				return this.processGreeting(reply);
 			case 'EHLO':
 				return this.processEhloReply(reply);
+			case 'MAIL':
+				return this.processMailReply(reply)
 			case 'QUIT':
 				return this.processQuitReply(reply);
 			default:
@@ -225,7 +227,7 @@ SMTPClient.prototype.processReply = function (reply) {
 		}
 	} catch (error) {
 		error.reply = error.reply || reply;
-		this.quit(error);
+		this.close(error);
 	}
 };
 
@@ -285,6 +287,26 @@ SMTPClient.prototype.processEhloReply = function (reply) {
 	throw new Error(strfmt('Received unexpected reply from server after %s: %d %s', this.phase, reply.code, reply.message));
 };
 
+SMTPClient.prototype.processMailReply = function (reply) {
+	this.session.mailFrom = {};
+	this.session.mailFrom.returnPath = this.envelope.mailFrom;
+	this.session.mailFrom.reply = reply;
+	switch (reply.code) {
+		case 250:
+			return this._emitReply('MAIL', reply, _.bind(this.rcptTo, this));
+		case 552:
+		case 451:
+		case 452:
+		case 550:
+		case 553:
+		case 503:
+		case 455:
+		case 555:
+			throw this.createSmtpError(reply);
+	}
+	throw new Error(strfmt('Received unexpected reply from server after %s: %d %s', this.phase, reply.code, reply.message));
+};
+
 SMTPClient.prototype.processQuitReply = function (reply) {
 	var nextAction = _.bind(this.close, this);
 	this.session.quit = {};
@@ -306,6 +328,37 @@ SMTPClient.prototype.ehlo = function (name) {
 	return this.command(strfmt('EHLO %s', name || this.name));
 };
 
+SMTPClient.prototype.mailFrom = function (sender) {
+	var args;
+	if (!sender) {
+		sender = '';
+		args = {};
+	} else if (_.isString(sender)) {
+		args = {};
+	} else {
+		args = sender.args;
+		sender = sender.returnPath;
+	}
+	this.envelope.mailFrom = sender;
+	return this.command({verb: 'MAIL', returnPath: sender, args: args});
+};
+
+SMTPClient.prototype.rcptTo = function (recipient) {
+	var rcpt, args;
+	if (!recipient) {
+		return this.close(new Error('No recipient address specified for RCPT TO: command. Quitting.'));
+	} else if (_.isString(recipient)) {
+		rcpt = recipient;
+		args = {};
+	} else {
+		rcpt = recipient.forwardPath;
+		args = recipient.args;
+	}
+	this.session.rcptTo = this.session.rcptTo || {};
+	this.session.rcptTo.forwardPaths = this.session.rcptTo.forwardPaths || {};
+	this.session.rcptTo.forwardPaths[rcpt] = 'pending';
+	this.command({verb: 'RCPT', forwardPath: rcpt, args: args});
+};
 
 SMTPClient.prototype.selectExtensions = function () {
 	var readyFn = _.bind(function (result) {
@@ -329,7 +382,7 @@ SMTPClient.prototype.selectExtensions = function () {
 	readyFn.keywords = keywords;
 	readyFn.lastAction = _.bind(function () {
 		var nextAction = _.bind(function () {
-			this.mailFrom();
+			this.mailFrom(this.envelope.mailFrom);
 		}, this);
 		this._emitReply('ESMTP', null, nextAction);
 	}, this);
@@ -365,7 +418,7 @@ SMTPClient.prototype.command = function (command) {
 			this.socket.once('drain', writeCommand);
 		}
 	}, this));
-	this.emit('command', this.lastCommand, this);
+	this.emit('command', this.currentCommand, this);
 };
 
 SMTPClient.prototype.onClose = function () {
