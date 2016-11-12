@@ -196,22 +196,6 @@ SMTPClient.prototype.processReply = function (reply) {
 	var error;
 	if (this.phase == 'ERROR')
 		return;
-	if (reply.code == 500) {
-		error = new Error(strfmt('Server indicates that our %s command exceeded size limit: %d %s / command was: %j', this.phase, reply.code, reply.message, this.currentCommand));
-		error.reply = reply;
-		return this.close(error);
-
-	}
-	if (reply.code == 501) {
-		error = new Error(strfmt('Server indicates a syntax error in our %s command: %d %s', this.phase, reply.code, reply.message));
-		error.reply = reply;
-		return this.close(error);
-	}
-	if (reply.code == 421) {
-		error = new Error(strfmt('Server indicates a temporary failure on their side: %d %s', reply.code, reply.message));
-		error.reply = reply;
-		return this.close(error);
-	}
 	try {
 		switch (this.phase) {
 			case 'GREETING':
@@ -220,6 +204,8 @@ SMTPClient.prototype.processReply = function (reply) {
 				return this.processEhloReply(reply);
 			case 'MAIL':
 				return this.processMailReply(reply)
+			case 'RCPT':
+				return this.processRcptReply(reply);
 			case 'QUIT':
 				return this.processQuitReply(reply);
 			default:
@@ -250,10 +236,9 @@ SMTPClient.prototype.processGreeting = function (reply) {
 				reply: reply
 			};
 			return this._emitReply('greeting', reply, _.bind(this.ehlo, this));
-		case 554:
-			return this.close(state.createSmtpError(reply));
+		default:
+			return this.close(this.createSmtpError(reply));
 	}
-	throw new Error(strfmt('Received unexpected reply from server after %s: %d %s', this.phase, reply.code, reply.message));
 };
 
 SMTPClient.prototype.processEhloReply = function (reply) {
@@ -279,32 +264,64 @@ SMTPClient.prototype.processEhloReply = function (reply) {
 
 			var nextAction = _.bind(this.selectExtensions, this);
 			return this._emitReply('ehlo', reply, nextAction);
-		case 504:
-		case 550:
-		case 502:
-			throw this.createSmtpError(reply);
+		default:
+			return this.close(this.createSmtpError(reply));
 	}
-	throw new Error(strfmt('Received unexpected reply from server after %s: %d %s', this.phase, reply.code, reply.message));
 };
 
 SMTPClient.prototype.processMailReply = function (reply) {
 	this.session.mailFrom = {};
 	this.session.mailFrom.returnPath = this.envelope.mailFrom;
 	this.session.mailFrom.reply = reply;
+	var _startRcptTo = _.bind(function () {
+		var rcptTo = {};
+		if (_.isString(this.envelope.rcptTo)) {
+			rcptTo[this.envelope.rcptTo] = {};
+		} else if (_.isArray(this.envelope.rcptTo)) {
+			_.each(this.envelope.rcptTo, function (rcpt) {
+				rcptTo[rcpt] = {};
+			});
+		}
+		this.envelope.rcptTo = rcptTo;
+		var nextRcpt = _.chain(rcptTo).keys().first().value();
+		this.command({verb: 'RCPT', forwardPath: nextRcpt, args: rcptTo[nextRcpt]});
+	}, this);
 	switch (reply.code) {
 		case 250:
-			return this._emitReply('MAIL', reply, _.bind(this.rcptTo, this));
-		case 552:
-		case 451:
-		case 452:
-		case 550:
-		case 553:
-		case 503:
-		case 455:
-		case 555:
-			throw this.createSmtpError(reply);
+			return this._emitReply('MAIL', reply, _startRcptTo);
+		default:
+			return this.close(this.createSmtpError(reply));
 	}
-	throw new Error(strfmt('Received unexpected reply from server after %s: %d %s', this.phase, reply.code, reply.message));
+};
+
+SMTPClient.prototype.processRcptReply = function (reply) {
+	this.session.rcptTo = this.session.rcptTo || {};
+	this.session.rcptTo.forwardPaths = this.session.rcptTo.forwardPaths || {};
+	var rcpt = this.currentCommand.forwardPath;
+
+	this.session.rcptTo.forwardPaths[rcpt] = {
+		result: reply.code == 250,
+		reply: reply
+	};
+	if ( reply.code != 250 ) {
+		this.emit('error', this.createSmtpError(reply));
+	}
+	var nextRcpt = _.chain(this.envelope.rcptTo)
+		.keys()
+		.reduce(_.bind(function (memo, key) {
+			if (memo) return memo;
+			return this.session.rcptTo.forwardPaths[key] ? memo : key
+		}, this), null)
+		.value();
+	var nextAction;
+	if ( nextRcpt === null ) {
+		nextAction = _.bind(this.doData, this);
+	} else {
+		nextAction = _.bind(function() {
+			this.rcptTo({verb: 'RCPT', forwardPath: nextRcpt, args: this.envelope.rcptTo[nextRcpt]});
+		}, this);
+	}
+	this._emitReply('RCPT', reply, nextAction);
 };
 
 SMTPClient.prototype.processQuitReply = function (reply) {
@@ -360,6 +377,8 @@ SMTPClient.prototype.rcptTo = function (recipient) {
 	this.command({verb: 'RCPT', forwardPath: rcpt, args: args});
 };
 
+SMTPClient.prototype.doData = function() {};
+
 SMTPClient.prototype.selectExtensions = function () {
 	var readyFn = _.bind(function (result) {
 		if (result && result instanceof Error) {
@@ -405,12 +424,16 @@ SMTPClient.prototype.command = function (command) {
 	this.currentCommand = command;
 	this.direction = SENDING;
 	var writeCommand = _.bind(function () {
-		var command = SMTPCommandLineParser.cmdToString(this.currentCommand);
-		if (this.socket.write(command)) {
-			this.debug('[%s] C: %s', this, command.replace("\r\n", ""));
-			this.direction = RECV;
-		} else {
-			return false;
+		try {
+			var command = SMTPCommandLineParser.cmdToString(this.currentCommand);
+			if (this.socket.write(command)) {
+				this.debug('[%s] C: %s', this, command.replace("\r\n", ""));
+				this.direction = RECV;
+			} else {
+				return false;
+			}
+		} catch (error) {
+			this.close(error);
 		}
 	}, this);
 	this.once('command', _.bind(function () {
@@ -448,7 +471,6 @@ SMTPClient.prototype.processConnect = function () {
 };
 
 SMTPClient.prototype.onData = function (chunk) {
-	var state = this;
 	if (this.direction != RECV) {
 		this.close(new Error("Out of band data from server received."));
 		return;

@@ -307,7 +307,8 @@ describe("SMTP Client", function () {
 
 
 	});
-	describe.only('Command MAIL FROM', function () {
+
+	describe('Command MAIL FROM', function () {
 		var serverPort;
 		var server;
 
@@ -364,7 +365,7 @@ describe("SMTP Client", function () {
 				});
 				client.on('error', function (error) {
 					try {
-						expect(error.message).to.be.equal('Server indicates a syntax error in our MAIL command: 501 Error: Bad sender address syntax');
+						expect(error.message).to.contain('501');
 						done();
 					} catch (error) {
 						done(error);
@@ -398,7 +399,72 @@ describe("SMTP Client", function () {
 
 			});
 		});
+	});
+
+	describe('Command RCPT TO', function () {
+		var serverPort;
+		var server;
+
+		beforeEach("Starting the test SMTP server.", function (done) {
+			serverPort = Math.floor(Math.random() * 20000) + 20000;
+			server = new SMTPServer({
+				useXForward: true,
+				authOptional: true
+			});
+			server.listen(serverPort, "localhost", function (args) {
+				done();
+			});
+		});
+
+		afterEach("Stopping the test SMTP server.", function (done) {
+			if (server) {
+				server.close(function () {
+					done();
+				});
+				server = undefined;
+			}
+		});
+
+		it('Emits an error if no recipient is defined.', function (done) {
+			var uri = strfmt('smtp://localhost:%d', serverPort);
+			var client = new Client(uri, {tls: {rejectUnauthorized: false}});
+			client.on('RCPT', function () {
+				done(new Error('RCTP TO command succeeded unexpectedly.'))
+			});
+			client.on('error', function (error) {
+				try {
+					expect(error.message).to.contain('RCPT command needs a "forwardPath" property with the address of the recipient.');
+					done();
+				} catch (err) {
+					done(err);
+				}
+			});
+			client.connect().catch(function (error) {
+				done(error);
+			});
+
+		});
+
+		it('Emits an error if server does not accept recipient.', function (done) {
+			var uri = strfmt('smtp://localhost:%d', serverPort);
+			var client = new Client(uri, {tls: {rejectUnauthorized: false}});
+			client.envelope.rcptTo = '<hdhdhdh@hshdh.de>';
+			client.on('error', function (error) {
+				try {
+					expect(error.message).to.be.contain('501');
+					client.close();
+					done();
+				} catch (err) {
+					done(err);
+				}
+			});
+			client.connect().catch(function (error) {
+				done(error);
+			});
+
+		});
 
 	});
 
 });
+
