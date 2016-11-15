@@ -464,6 +464,47 @@ describe("SMTP Client", function () {
 
 		});
 
+		it('Emits an error if one of multiple recipients are rejected but does continue.', function (done) {
+			var uri = strfmt('smtp://localhost:%d', serverPort);
+			var client = new Client(uri, {tls: {rejectUnauthorized: false}});
+			var gotError = false;
+			var remainingRcpt = 2;
+			client.envelope.rcptTo = ['<hdhdhdh@hshdh.de>', 'info@testbaleen.org'];
+			client.on('RCPT', function (reply, callback) {
+				remainingRcpt--;
+				if (!remainingRcpt) {
+					try {
+						expect(gotError).to.be.true;
+						expect(client.session.rcptTo.forwardPaths['info@testbaleen.org']).to.exist;
+						expect(client.session.rcptTo.forwardPaths['<hdhdhdh@hshdh.de>']).to.exist;
+						expect(client.session.rcptTo.forwardPaths['info@testbaleen.org'].result).to.be.true;
+						expect(client.session.rcptTo.forwardPaths['<hdhdhdh@hshdh.de>'].result).to.not.be.true;
+						done();
+						return;
+					} catch (err) {
+						done(err);
+
+					} finally {
+						client.close();
+					}
+				}
+				callback();
+			});
+			client.on('error', function (error) {
+				try {
+					expect(error.message).to.be.contain('501');
+					gotError = true;
+				} catch (err) {
+					client.close();
+					done(err);
+				}
+			});
+			client.connect().catch(function (error) {
+				done(error);
+			});
+
+		});
+
 	});
 
 });
