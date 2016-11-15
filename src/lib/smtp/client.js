@@ -8,6 +8,7 @@ var tls = require('tls');
 var URI = require('urijs');
 
 var SMTPCommandLineParser = require('./parsers/command');
+var SMTPDataEncoder = require('./parsers/data').DotEncoder;
 var SMTPStartTls = require('./extensions/startTls');
 var SMTPSize = require('./extensions/size');
 var SMTPAuthPlain = require('./extensions/authPlain');
@@ -88,7 +89,7 @@ function SMTPClient() {
 		mailFrom: false,
 		rcptTo: []
 	};
-	this.data = false;
+	this.content = false;
 
 }
 
@@ -203,9 +204,11 @@ SMTPClient.prototype.processReply = function (reply) {
 			case 'EHLO':
 				return this.processEhloReply(reply);
 			case 'MAIL':
-				return this.processMailReply(reply)
+				return this.processMailReply(reply);
 			case 'RCPT':
 				return this.processRcptReply(reply);
+			case 'DATA':
+				return this.processDataReply(reply);
 			case 'QUIT':
 				return this.processQuitReply(reply);
 			default:
@@ -303,7 +306,7 @@ SMTPClient.prototype.processRcptReply = function (reply) {
 		result: reply.code == 250,
 		reply: reply
 	};
-	if ( reply.code != 250 ) {
+	if (reply.code != 250) {
 		this.emit('error', this.createSmtpError(reply));
 	}
 	var nextRcpt = _.chain(this.envelope.rcptTo)
@@ -314,14 +317,36 @@ SMTPClient.prototype.processRcptReply = function (reply) {
 		}, this), null)
 		.value();
 	var nextAction;
-	if ( nextRcpt === null ) {
-		nextAction = _.bind(this.doData, this);
+	if (nextRcpt === null) {
+		var success = _.chain(this.session.rcptTo.forwardPaths)
+			.keys()
+			.reduce(_.bind(function (memo, key) {
+				if (!this.session.rcptTo.forwardPaths[key].result) return false;
+				return memo;
+			}, this), true)
+			.value();
+		nextAction = _.bind(success ? this.data : this.close, this);
 	} else {
-		nextAction = _.bind(function() {
+		nextAction = _.bind(function () {
 			this.rcptTo({verb: 'RCPT', forwardPath: nextRcpt, args: this.envelope.rcptTo[nextRcpt]});
 		}, this);
 	}
 	this._emitReply('RCPT', reply, nextAction);
+};
+
+SMTPClient.prototype.processDataReply = function (reply) {
+	switch (reply.code) {
+		case 250:
+			this.session.data.reply = reply;
+			return this._emitReply('DATA', reply, _.bind(this.quit, this));
+		case 354:
+			this.session.data = {};
+			this.session.data.source = this.content;
+			this.session.data.reply = reply;
+			return this._emitReply('DATA', reply, _.bind(this.data, this));
+		default:
+			return this.close(this.createSmtpError(reply));
+	}
 };
 
 SMTPClient.prototype.processQuitReply = function (reply) {
@@ -330,7 +355,7 @@ SMTPClient.prototype.processQuitReply = function (reply) {
 	if (reply.code == 221) {
 		this.session.quit.lastWords = reply.message
 	}
-	return this._emitReply('quit', reply, nextAction);
+	return this._emitReply('QUIT', reply, nextAction);
 };
 
 SMTPClient.prototype.quit = function () {
@@ -377,7 +402,39 @@ SMTPClient.prototype.rcptTo = function (recipient) {
 	this.command({verb: 'RCPT', forwardPath: rcpt, args: args});
 };
 
-SMTPClient.prototype.doData = function() {};
+SMTPClient.prototype.data = function () {
+	var source;
+	if (!this.session.data) {
+		return this.command({verb: 'DATA'});
+	}
+	if (!this.session.data.source) {
+		return this.close(new Error('No message content to sent.'));
+	}
+	var encoder = new SMTPDataEncoder();
+	source = this.session.data.source;
+	if (_.isString(source)) {
+		source = Buffer.from(this.session.data.source, 'utf8');
+	}
+	if (source instanceof Buffer) {
+		var buffer = source;
+		source = new stream.Readable();
+		encoder.on('pipe', function () {
+			source.push(buffer);
+			source.push(null);
+		});
+	}
+	source.pipe(encoder);
+	encoder.on('data', _.bind(function (chunk) {
+		if (!this.socket.write(chunk)) {
+			this.socket.once('drain', _.bind(function () {
+				this.socket.write(chunk);
+			}, this));
+		}
+	}, this));
+	encoder.on('end', _.bind(function () {
+		this.direction = RECV;
+	}, this));
+};
 
 SMTPClient.prototype.selectExtensions = function () {
 	var readyFn = _.bind(function (result) {

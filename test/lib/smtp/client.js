@@ -2,6 +2,7 @@ var SMTPServer = require('smtp-server').SMTPServer;
 var Client = require('../../../src/lib/smtp/client');
 var SMTPStartTls = require('../../../src/lib/smtp/extensions/startTls');
 var expect = require("chai").expect;
+var fs = require('fs');
 var os = require('os');
 var strfmt = require('util').format;
 var _ = require('underscore');
@@ -507,5 +508,127 @@ describe("SMTP Client", function () {
 
 	});
 
+	describe('Command DATA', function () {
+		var serverPort;
+		var server;
+
+		beforeEach("Starting the test SMTP server.", function (done) {
+			serverPort = Math.floor(Math.random() * 20000) + 20000;
+			server = new SMTPServer({
+				useXForward: true,
+				authOptional: true
+			});
+			server.listen(serverPort, "localhost", function (args) {
+				done();
+			});
+		});
+
+		afterEach("Stopping the test SMTP server.", function (done) {
+			if (server) {
+				server.close(function () {
+					done();
+				});
+				server = undefined;
+			}
+		});
+
+		it('sends a MIME formatted string to the server.', function (done) {
+			fs.readFile('test/lib/smtp/data/sample_email.txt', {encoding: 'utf8'}, function (err, data) {
+				if (err) return done(err);
+				var uri = strfmt('smtp://localhost:%d', serverPort);
+				var client = new Client(uri, {tls: {rejectUnauthorized: false}});
+				client.envelope.mailFrom = 'test@baleentest.io';
+				client.envelope.rcptTo = 'test2@baleentest.io';
+				client.content = data;
+				client.on('error', function (err) {
+					client.close();
+					done(err);
+				});
+				client.on('DATA', function (reply, callback) {
+					if (reply.code == 354) return callback();
+					try {
+						expect(reply.code).to.be.equal(250);
+						callback();
+					} catch (err) {
+						done(err);
+					}
+				});
+				client.on('QUIT', function (reply, callback) {
+					callback();
+					done();
+				});
+				client.connect().catch(function (error) {
+					done(error);
+				});
+
+			});
+
+		});
+
+		it('sends a MIME formatted message from a buffer to the server.', function (done) {
+			fs.readFile('test/lib/smtp/data/sample_email.txt', function (err, data) {
+				if (err) return done(err);
+				var uri = strfmt('smtp://localhost:%d', serverPort);
+				var client = new Client(uri, {tls: {rejectUnauthorized: false}});
+				client.envelope.mailFrom = 'test@baleentest.io';
+				client.envelope.rcptTo = 'test2@baleentest.io';
+				client.content = data;
+				client.on('error', function (err) {
+					client.close();
+					done(err);
+				});
+				client.on('DATA', function (reply, callback) {
+					if (reply.code == 354) return callback();
+					try {
+						expect(reply.code).to.be.equal(250);
+						callback();
+					} catch (err) {
+						done(err);
+					}
+				});
+				client.on('QUIT', function (reply, callback) {
+					callback();
+					done();
+				});
+				client.connect().catch(function (error) {
+					done(error);
+				});
+
+			});
+
+		});
+
+		it('sends a MIME formatted message from a stream to the server.', function (done) {
+			var stream = fs.createReadStream('test/lib/smtp/data/sample_email.txt');
+			var uri = strfmt('smtp://localhost:%d', serverPort);
+			var client = new Client(uri, {tls: {rejectUnauthorized: false}});
+			client.envelope.mailFrom = 'test@baleentest.io';
+			client.envelope.rcptTo = 'test2@baleentest.io';
+			client.content = stream;
+			client.on('error', function (err) {
+				client.close();
+				done(err);
+			});
+			client.on('DATA', function (reply, callback) {
+				if (reply.code == 354) return callback();
+				try {
+					expect(reply.code).to.be.equal(250);
+					callback();
+				} catch (err) {
+					done(err);
+				}
+			});
+			client.on('QUIT', function (reply, callback) {
+				callback();
+				done();
+			});
+			client.connect().catch(function (error) {
+				done(error);
+			});
+
+
+		});
+
+	});
 });
 
